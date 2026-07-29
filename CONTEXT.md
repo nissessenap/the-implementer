@@ -28,8 +28,26 @@ layer and nothing language-specific: a shell, `git`, `gh`, `bubblewrap`, the age
 CLI, baked skills, the phase script, and a non-root user. **Its Dockerfile is the
 image contract.** See [ADR 0001](docs/adr/0001-sandbox-image-strategy-and-byo-contract.md).
 
-**Language layer** — a thin image derived from the base that adds exactly one
+**Toolchain layer** — a thin image derived from the base that adds exactly one
 toolchain, typically four lines of Dockerfile. We ship only the ones we dogfood.
+
+**Toolchain** — the key space image selection joins on: a small vocabulary of ours
+(`go`, `node`, `python`, …), not a language name. An image installs a toolchain,
+not a language, and Linguist's names do not survive the join — `package.json` is
+the manifest for both `JavaScript` and `TypeScript`. See
+[ADR 0003](docs/adr/0003-toolchain-detection-and-image-selection.md).
+
+**Detection** — how a run picks its image: root manifests first, `GET /languages`
+as the fallback, each normalised to a toolchain and intersected with the images
+the operator configured. Runs orchestrator-side before the Job exists; adds no
+state. Ambiguity and non-detection both **refuse and comment** rather than guess,
+because a wrong image fails deep after the tokens are spent.
+
+**Version seam** — image lookup is longest-key-first (`python-3.14` before
+`python`), so a versioned toolchain is a later table entry rather than a redesign.
+v1 never emits a version; it owes the seam, not the feature. The deferred
+overrides — a repo-side `.implementer.yaml`, or an image named in the triggering
+comment — land here.
 
 **Image contract** — the minimum an image must satisfy to be usable as a sandbox.
 Deliberately small enough to bolt onto an organization's existing builder image,
