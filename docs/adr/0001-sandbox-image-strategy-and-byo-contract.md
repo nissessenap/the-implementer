@@ -248,18 +248,48 @@ diagnostic. A contract nobody verifies is a comment.
 - **Cross-run cache reuse is now ticketable** and graduated out of the map's fog
   as [issue #20][caches].
 
-## Verify before committing
+## Verification
 
-Two claims this ADR relies on are unverified. Both are cheap smoke tests and both
-are load-bearing.
+### Verified: `--plugin-dir` exposes a skill in `-p` mode ✅
+
+Tested against `claude 2.1.220`. A minimal plugin
+(`.claude-plugin/plugin.json` + `skills/probe-implement/SKILL.md`, carrying
+`disable-model-invocation: true` to mirror `/implement`):
+
+```
+claude -p --plugin-dir <path> "/probe-implement isolated789" --output-format json
+→ subtype: success, is_error: False, terminal_reason: completed
+  result: 'PLUGIN_DIR_SKILL_LOADED isolated789'
+```
+
+Critically, this was re-run with a **fresh `HOME` containing only
+`.claude/.credentials.json`** — no `~/.claude/plugins/` at all — and it still
+resolved. So the mechanism does not depend on `HOME`, which is exactly what the
+ephemeral-`HOME` decision requires.
+
+Two incidental findings from the same test:
+
+- **The skill resolved as bare `/probe-implement`, not
+  `/probe-plugin:probe-implement`.** Plugin-provided skills are invocable
+  unprefixed, so the phase script can pass `/implement` rather than
+  `/mattpocock-skills:implement`. Relevant to the run-plan ticket's prompt
+  strings.
+- **An empty `HOME` breaks authentication**, not skill loading: with no
+  `~/.claude/.credentials.json` the run failed `terminal_reason: api_error`,
+  `result: 'Not logged in · Please run /login'`. So an ephemeral `HOME` means the
+  pod **must** supply credentials via the environment or `apiKeyHelper` — it
+  cannot rely on anything resident in `~/.claude`. This is a constraint on the
+  credential model, not an obstacle here.
+
+### Still to verify
+
+Both need a cluster, so they are tracked as [issue #22][verify] rather than left
+in this document.
 
 1. **`/dev/termination-log` is writable under `readOnlyRootFilesystem: true`.**
    The kubelet bind-mounts it, so it should be, but [the map's entire compact
    result channel][map] depends on it.
-2. **`--plugin-dir` exposes `/implement` in `-p` mode.** Skills-in-headless was
-   verified via normal `$HOME` discovery ([audit][audit]); the `--plugin-dir`
-   path was not, and the ephemeral-`HOME` decision makes it the only path.
-3. **`bubblewrap` initialises inside the container** under gVisor and whatever
+2. **`bubblewrap` initialises inside the container** under gVisor and whatever
    capability set we settle on. If it cannot, the choice is
    `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` or a looser security context.
 
@@ -289,3 +319,4 @@ are load-bearing.
 [egress]: https://github.com/nissessenap/the-implementer/issues/16
 [registries]: https://github.com/nissessenap/the-implementer/issues/19
 [caches]: https://github.com/nissessenap/the-implementer/issues/20
+[verify]: https://github.com/nissessenap/the-implementer/issues/22
