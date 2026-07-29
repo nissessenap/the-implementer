@@ -10,7 +10,10 @@ then produces a pull request.
 ## Sandbox and images
 
 **Run** — one attempt at implementing one GitHub issue. Executes as a single
-Kubernetes workload and produces at most one branch.
+`batch/v1` **Job** — one pod, `restartPolicy: Never`, `backoffLimit: 0`, gVisor
+via `runtimeClassName` — and produces at most one branch. The Job name derives
+from the issue, which is what makes webhook redelivery idempotent. See
+[ADR 0002](docs/adr/0002-a-run-executes-as-a-kubernetes-job.md).
 
 **Sandbox** — the isolated container a run executes in. Holds the checkout, the
 toolchain, and the agent CLI. Nothing in it survives the run.
@@ -64,4 +67,11 @@ survives the ephemeral `HOME`.
 
 **Result channel** — how data leaves the sandbox without `kubectl exec`. A compact
 structured result via `/dev/termination-log`, surfaced on pod status; the full
-transcript via `pods/log`.
+transcript via `pods/log`. Both are pod-level, which is why the orchestrator's
+informer watches Pods rather than Jobs.
+
+**Resume seam** — the one obligation trigger #3 (PR-review feedback) places on
+v1: the workspace and `HOME` mounts stay *swappable* from `emptyDir` to a PVC, and
+neither the phase script nor the orchestrator assumes nothing survives a run.
+Resuming is `claude --resume` against a persisted session directory, so it is a
+property of the volume, not of the workload primitive.
