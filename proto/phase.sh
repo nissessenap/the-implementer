@@ -10,13 +10,14 @@ set -eu
 REPO=${REPO:?REPO=owner/name required}
 ISSUE=${ISSUE:?ISSUE=<number> required}
 WORKSPACE=${WORKSPACE:-/workspace}
-BRANCH="implementer/issue-${ISSUE}"
+BRANCH="implementer/issue-${ISSUE}${BRANCH_SUFFIX:-}"
 TERM_LOG=/dev/termination-log
 PHASE=preflight
 
 # Probe outcomes, accumulated so they reach the termination log as well as stdout.
 PROBE_TERMLOG=untested
 PROBE_BWRAP=untested
+PROBE_SANDBOX=untested
 
 say()  { printf '\n=== %s\n' "$*" >&2; }
 probe() { printf 'PROBE %-16s %s\n' "$1" "$2" >&2; }
@@ -27,8 +28,9 @@ termlog() {
   jq -cn \
     --arg status "$1" --arg phase "$PHASE" --arg message "$2" \
     --arg termlog "$PROBE_TERMLOG" --arg bwrap "$PROBE_BWRAP" \
+    --arg sandbox "$PROBE_SANDBOX" \
     '{status:$status, phase:$phase, message:$message,
-      probes:{termination_log:$termlog, bubblewrap:$bwrap}}' \
+      probes:{termination_log:$termlog, bubblewrap:$bwrap, sandbox:$sandbox}}' \
   | cut -c1-4000 > "$TERM_LOG" 2>/dev/null \
   || echo "!!! could not write $TERM_LOG" >&2
 }
@@ -61,6 +63,13 @@ PROBE_BWRAP="plain=$(bw) net=$(bw --unshare-net)"
 probe "bubblewrap" "$PROBE_BWRAP"
 
 probe "whoami" "uid=$(id -u) gid=$(id -g) home=${HOME:-unset}"
+
+# Am I actually in a gVisor sandbox? gVisor serves its own dmesg and announces
+# itself there; on host runc dmesg is empty or denied (kernel.dmesg_restrict).
+# This is the only probe that distinguishes "RuntimeClass applied" from
+# "RuntimeClass silently ignored", which is worth knowing before trusting a run.
+PROBE_SANDBOX=$(dmesg 2>/dev/null | head -1 | cut -c1-90)
+probe "sandbox" "dmesg=${PROBE_SANDBOX:-<empty/denied>} kernel=$(uname -r)"
 probe "rootfs" "$(touch /rootfs-probe 2>/dev/null && echo WRITABLE || echo read-only)"
 probe "workspace" "$(touch "${WORKSPACE}/.probe" 2>/dev/null && echo writable || echo NOT-WRITABLE)"
 probe "home" "$(touch "${HOME:-/nonexistent}/.probe" 2>/dev/null && echo writable || echo NOT-WRITABLE)"

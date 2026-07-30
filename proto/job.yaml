@@ -1,7 +1,7 @@
 # PROTOTYPE — throwaway. Placeholders are substituted by go.sh.
 #
-# Mirrors ADR 0002's primitive and ADR 0001's run-time posture as closely as a
-# kind cluster allows, because that posture is exactly what we are testing.
+# Mirrors ADR 0002's primitive and ADR 0001's run-time posture as closely as the
+# local cluster allows, because that posture is exactly what we are testing.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -15,14 +15,8 @@ spec:
     spec:
       restartPolicy: Never
       __RUNTIME_CLASS__
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        __SECCOMP__
-        # An emptyDir mounts root:root 0755. fsGroup is what makes it writable by
-        # a non-root user — this is how the UID stays a PodSpec field.
-        fsGroup: 1000
+      # One flow mapping, built by go.sh — see the POD_SECURITY comment there.
+      securityContext: __POD_SECURITY__
       containers:
         - name: agent
           image: __IMG__
@@ -38,6 +32,15 @@ spec:
               value: "__ISSUE__"
             - name: PREFLIGHT_ONLY
               value: "__PREFLIGHT_ONLY__"
+            - name: BRANCH_SUFFIX
+              value: "__BRANCH_SUFFIX__"
+            # The agent CLI refuses --dangerously-skip-permissions as uid 0. The
+            # gate (read out of the 2.1.220 binary) is:
+            #   getuid()===0 && IS_SANDBOX!=="1" && !CLAUDE_CODE_BUBBLEWRAP
+            # so root is permitted inside a *deliberate* sandbox. A gVisor Job is
+            # one. Harmless when running non-root; required when ROOT=1.
+            - name: IS_SANDBOX
+              value: "1"
             - name: HOME
               value: /home/agent
             - name: WORKSPACE
