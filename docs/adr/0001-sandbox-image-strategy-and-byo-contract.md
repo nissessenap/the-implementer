@@ -89,12 +89,12 @@ forced to abandon it and inherit from ours.
 |---|---|
 | **glibc base** — no musl/Alpine | The `claude` binary is a dynamically-linked 263 MB ELF against `/lib64/ld-linux-x86-64.so.2` |
 | **A shell** | The phase script is `sh` |
-| **Non-root, `USER 1000` as the image default** | `--dangerously-skip-permissions` refuses to run as root ([audit][audit]) |
+| **Non-root, `USER 1000` as the image default** | Under gVisor, `bubblewrap` fails outright as uid 0 ([spike][k3sspike]). The agent CLI's own root refusal is the weaker reason — it is bypassable |
 | **No UID constant in the orchestrator** | scion's exact trap; the PodSpec owns the UID |
 | **`git`** | clone, branch, commit, push |
 | **`gh`** | GitHub CLI operations inside the run |
 | **An agent CLI on `PATH`** | Deliberately engine-agnostic wording |
-| **`bubblewrap`** | Required by Claude Code's subprocess env scrubbing |
+| **`bubblewrap`** | Required by Claude Code's subprocess env scrubbing. The contract requires the **binary**, not a working network namespace — `--unshare-net` is broken under gVisor ([spike][k3sspike]) |
 | **Baked skills at a read-only path** | See below |
 | **The phase script at a known path** | See below |
 | Explicitly **not** required: `tar`, `chown`, `touch`, `rsync`, `zsh`, `sudo`, node/npm | We never use pod exec, so nothing in-image serves our control plane |
@@ -214,9 +214,23 @@ ticket rather than an unacknowledged hole.
   is a contract requirement. It strips Anthropic and cloud credentials from
   subprocess environments — the mitigation class for the Microsoft finding where
   the `Read` tool lifted `ANTHROPIC_API_KEY` from `/proc/self/environ`.
-- **Capabilities.** Dropping ALL is desirable but not a v1 priority: bubblewrap
-  needs user namespaces and may not initialise under a fully-stripped context.
-  gVisor carries the isolation burden in the meantime.
+- **`seccompProfile: RuntimeDefault`,** which also satisfies Pod Security
+  Standards `restricted`. On host `runc` this profile *breaks* bubblewrap by
+  blocking `unshare(CLONE_NEWUSER)`; **under gVisor it is a no-op**, because the
+  sentry serves the syscall itself. Measured both ways in [the k3s
+  spike][k3sspike]. This is the reason gVisor is not merely defence-in-depth here:
+  it is what lets the image contract and the strictest PSS profile coexist.
+- **Capabilities.** Drop ALL. The spike ran the full path — agent, `git`, `gh`,
+  and rootless Docker — at uid 1000 under gVisor with no added capability and
+  without `privileged`, so the earlier worry that bubblewrap would need a
+  capability did not survive measurement. bubblewrap creates its user namespace
+  unprivileged; what it cannot do under gVisor is `--unshare-net`, and no
+  capability fixes that.
+- **gVisor (`runtimeClassName`) is load-bearing, not optional.** It is what makes
+  the two bullets above true. It is also not free to the operator: k3s does not
+  autodetect `runsc` and needs a containerd drop-in, and GKE needs a dedicated
+  `--sandbox type=gvisor` node pool. That prerequisite belongs to the deployment
+  story, but it is a prerequisite, not a nice-to-have.
 
 Dependency caches live on ephemeral volumes and die with the pod. Reusing them
 across runs is [issue #20][caches].
@@ -269,11 +283,14 @@ ephemeral-`HOME` decision requires.
 
 Two incidental findings from the same test:
 
-- **The skill resolved as bare `/probe-implement`, not
-  `/probe-plugin:probe-implement`.** Plugin-provided skills are invocable
-  unprefixed, so the phase script can pass `/implement` rather than
-  `/mattpocock-skills:implement`. Relevant to the run-plan ticket's prompt
-  strings.
+- ~~**The skill resolved as bare `/probe-implement`.**~~ **Retracted — does not
+  generalise.** That was a hand-rolled single-skill plugin. The real marketplace
+  repo loads cleanly (`plugin_errors: null`, `mattpocock-skills@1.2.0`) but
+  advertises only the **prefixed** forms in `slash_commands`:
+  `mattpocock-skills:implement`, `:tdd`, `:code-review`. There is no bare
+  `implement`. The phase script must pass the prefixed name, which is what both
+  spikes do. Relevant to the run-plan ticket's prompt strings — this is the
+  correction, not the original claim.
 - **An empty `HOME` breaks authentication**, not skill loading: with no
   `~/.claude/.credentials.json` the run failed `terminal_reason: api_error`,
   `result: 'Not logged in · Please run /login'`. So an ephemeral `HOME` means the
@@ -281,17 +298,39 @@ Two incidental findings from the same test:
   cannot rely on anything resident in `~/.claude`. This is a constraint on the
   credential model, not an obstacle here.
 
-### Still to verify
+### Verified against a cluster ✅
 
-Both need a cluster, so they are tracked as [issue #22][verify] rather than left
-in this document.
+Both open items from [issue #22][verify] are now measured — first on kind, then on
+k3s with real gVisor. Detail in [the k3s spike][k3sspike].
 
-1. **`/dev/termination-log` is writable under `readOnlyRootFilesystem: true`.**
-   The kubelet bind-mounts it, so it should be, but [the map's entire compact
-   result channel][map] depends on it.
-2. **`bubblewrap` initialises inside the container** under gVisor and whatever
-   capability set we settle on. If it cannot, the choice is
-   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` or a looser security context.
+1. **`/dev/termination-log` is writable under `readOnlyRootFilesystem: true`** ✅ —
+   the kubelet's bind mount survives the read-only rootfs, and the compact result
+   round-trips to `.status.containerStatuses[].state.terminated.message`. Confirmed
+   at uid 1000 *and* uid 0, with and without gVisor, in runs where `/` is
+   separately confirmed read-only.
+2. **`bubblewrap` initialises — partly.** Under gVisor at uid 1000, plain
+   `bwrap --ro-bind / /` works and is **unaffected by `seccompProfile`**.
+   `--unshare-net` fails (`loopback: Failed RTM_NEWADDR`), which is an open
+   upstream bug ([bubblewrap#745][bw745], [gvisor#13438][gv13438]) still present in
+   runsc `release-20260727.0`. At uid 0 bubblewrap fails entirely.
+
+So the fallback this section anticipated — `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` or
+a looser security context — is **not needed for the seccomp reason**, which was the
+likely one. What remains unavailable is bubblewrap's network namespace
+specifically. Whether env scrubbing depends on it is not yet established; the
+untried lead is `runsc bwrap`, a bubblewrap-CLI-compatible reimplementation that
+ships in the same runsc release ([gvisor#13347][gv13347]), reachable via the
+`CLAUDE_CODE_BUBBLEWRAP` variable the CLI already reads.
+
+### Verified: the whole path runs under gVisor ✅
+
+Three green end-to-end runs against a scratch repo — kind/host-`runc` at uid 1000,
+then gVisor at uid 0 and uid 1000 — each ending in a pushed branch with CI green.
+gVisor costs roughly **25% wall-clock** and nothing in dollars. Also measured:
+**rootless Docker runs inside the plain gVisor sandbox at uid 1000, unprivileged**
+(container, bind mount, `compose up`), which is a capability this ADR never
+claimed and which the base image does not currently provide — see [issue
+#28][dind].
 
 ## Alternatives rejected
 
@@ -320,3 +359,8 @@ in this document.
 [registries]: https://github.com/nissessenap/the-implementer/issues/19
 [caches]: https://github.com/nissessenap/the-implementer/issues/20
 [verify]: https://github.com/nissessenap/the-implementer/issues/22
+[dind]: https://github.com/nissessenap/the-implementer/issues/28
+[k3sspike]: https://github.com/nissessenap/the-implementer/pull/27
+[bw745]: https://github.com/containers/bubblewrap/issues/745
+[gv13438]: https://github.com/google/gvisor/issues/13438
+[gv13347]: https://github.com/google/gvisor/pull/13347

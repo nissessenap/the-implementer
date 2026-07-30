@@ -18,6 +18,15 @@ from the issue, which is what makes webhook redelivery idempotent. See
 **Sandbox** — the isolated container a run executes in. Holds the checkout, the
 toolchain, and the agent CLI. Nothing in it survives the run.
 
+**Sandbox posture** — the security context a run executes under:
+`runtimeClassName: gvisor`, uid 1000, `seccompProfile: RuntimeDefault`,
+`readOnlyRootFilesystem: true`, all capabilities dropped, not privileged. gVisor is
+**load-bearing rather than defence-in-depth**: it is what makes `RuntimeDefault`
+compatible with `bubblewrap`, so the strictest Pod Security Standard and the image
+contract can coexist. Root is not a cheaper alternative — under gVisor,
+`bubblewrap` fails outright as uid 0. See
+[ADR 0001](docs/adr/0001-sandbox-image-strategy-and-byo-contract.md).
+
 **Agent CLI** — the binary that does the implementing, invoked by the phase
 script. Named as a role rather than a product: v1 ships `claude` as the only
 implementation, but the image contract says only "an agent CLI on `PATH`", so an
