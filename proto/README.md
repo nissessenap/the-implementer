@@ -349,12 +349,132 @@ prototype pushes with a **user PAT** (`gh auth token`), not a GitHub App
 **installation token**. [Issue #13][13]'s open question is specifically about the
 latter. This result does not answer it.
 
+## dind-net.sh — can an inner container reach the agent? (issue [#28][28])
+
+`dind.sh` left Docker looking usable and it was not. It ran dockerd under
+`rootlesskit --net=slirp4netns` and only ever started containers that print and
+exit, so it never asked the question that decides whether Docker is worth having:
+**can the sandbox's own process connect to a service running in an inner
+container?** Without that, `testcontainers` and any `compose` where the app talks
+to a database are impossible — which is the entire reason a coding sandbox wants
+Docker.
+
+`dind-net.sh` asks it. Three paths were on the table in #28; the third wins.
+
+### ✅ Wrap the WHOLE phase script in rootlesskit, not just dockerd
+
+`MODE=wrap` (the default). The agent process, dockerd, and inner containers on
+`--network=host` then share one network namespace, so `localhost` is shared and no
+bridge is needed. Every networking probe passes, at uid 1000, unprivileged, on the
+plain `gvisor` RuntimeClass:
+
+| probe | result |
+|---|---|
+| dockerd boots | ✅ 29.6.2 |
+| image pull | ✅ |
+| **sandbox → inner container** (the acceptance criterion) | ✅ |
+| **inner container → sandbox** | ✅ |
+| inner → inner | ✅ |
+| inner container egress | ✅ |
+| **`compose` service reachable from the sandbox** | ✅ |
+| `docker build`, self-contained `RUN` | ✅ *with `--feature containerd-snapshotter=false`* |
+| `docker network create` (bridge) | ❌ expected — `ip_forward` is EPERM |
+| `docker build` with a network-using `RUN` | ❌ buildkit wants a bridge for `RUN` |
+
+Two things this corrects in the `dind.sh` section above:
+
+- **`docker build` is no longer unknown.** The "intermittent containerd snapshotter
+  mount lock" was the containerd snapshotter, not intermittence. `--feature
+  containerd-snapshotter=false` (overlay2) builds cleanly, first try. `RUN` steps
+  that fetch from the network still fail — buildkit gives them a bridge network we
+  cannot create — so `--network=none` builds work and dependency-fetching ones do not.
+- **"No `docker run -p`, no inter-container networking" was the right observation
+  from the wrong configuration.** On a shared netns none of it is needed: containers
+  talk over `localhost` and publishing is moot.
+
+### ⚠️ Gate on `docker version`, never `docker info`
+
+`docker info` answers while buildkit is still initialising — roughly 6 seconds
+before `Daemon has completed initialization`. A readiness loop that breaks on
+`docker info` therefore returns before the daemon is usable, and everything after
+it fails with `EOF` against the socket. `dind.sh` did not notice because it only
+ran short-lived containers. Gate on `docker version`.
+
+### ❌ `rootlesskit --net=host` panics dockerd (upstream bug)
+
+`MODE=host` reproduces it. Path 1 in #28 — drop the netns so dockerd shares the
+pod's — was the cheapest option and it is blocked:
+
+```
+2026/07/31 19:35:11 http: panic serving @: runtime error: invalid memory address
+  or nil pointer dereference
+  ...daemon/server/router/system.(*systemRouter).getVersion
+     daemon/server/router/system/system_routes.go:132
+```
+
+dockerd boots fine and `docker info` returns 0, so it looks healthy. The first
+`docker version` panics the handler, the CLI cannot negotiate an API version, and
+every later command fails. Docker 29.6.2, runsc `release-20260727.0`. Not seen
+under `--net=slirp4netns`, so it is specific to `--net=host`. Worth reporting
+upstream.
+
+### ⚠️ The cost: inside rootlesskit the process is uid 0
+
+```
+PROBE whoami   uid=0 gid=0
+PROBE uid_map   0 1000 1| 1 100000 65536|
+```
+
+The pod is still uid 1000 to gVisor and to the kernel — but code inside the
+namespace reads its own uid as 0. Wrapping the phase script therefore has two
+consequences that land squarely on [ADR 0001][adr1]:
+
+1. **The agent CLI's root gate trips.** It is
+   `getuid()===0 && IS_SANDBOX!=="1" && !CLAUDE_CODE_BUBBLEWRAP`, so
+   `--dangerously-skip-permissions` refuses unless `IS_SANDBOX=1` is set —
+   the exact bypass the audit in [#6][6] found and that the non-root posture was
+   chosen to avoid needing.
+2. **bubblewrap is at risk, and this run did not settle it.** [#22][22] found bwrap
+   fails as uid 0 under gVisor because the sandbox holds no host capabilities, so
+   bwrap takes the privileged mount path and is denied. Inside rootlesskit the uid
+   *is* 0. ADR 0001 requires the bubblewrap binary, so this needs measuring before
+   any adoption. **Status: unmeasured**, for the reason below.
+
+### ➖ Grafting this onto *our* base image is not "add a package"
+
+Three attempts to reproduce the working setup on `implementer-proto:dev` failed on
+progressively deeper missing pieces:
+
+| attempt | missing |
+|---|---|
+| 1 | `slirp4netns` |
+| 2 | `newuidmap` (Debian `uidmap`) |
+| 3 | `newuidmap: write to uid_map failed: Operation not permitted` — needs `/etc/subuid` ranges plus the privilege to apply them |
+
+`docker:29-dind-rootless` works because it is *purpose-built* as a rootless-docker
+image: a dedicated user with subuid/subgid ranges and appropriately privileged
+`newuidmap`/`newgidmap`. So the real cost is **"make our base image a
+rootless-docker image"** — `docker-cli`, `dockerd`, `containerd`, `runc`,
+`rootlesskit`, `slirp4netns`, `fuse-overlayfs`, `uidmap`, plus the subuid plumbing
+and the privilege bits — not `apt-get install docker`. It is still only a
+Dockerfile, but it is a different image, and it is what blocked the bwrap
+measurement above.
+
+### What #28 should decide with this
+
+The ticket's question is answered **yes**: an inner container can reach the agent
+process, and the testcontainers shape works. But the path that achieves it costs
+uid-0-inside-the-namespace, which collides with two things ADR 0001 decided
+deliberately. That is a scope call, not a measurement — the measurement is done.
+
 [t1]: https://github.com/nissessenap/tmp-test-repo/issues/1
 [13]: https://github.com/nissessenap/the-implementer/issues/13
 
 [adr1]: ../docs/adr/0001-sandbox-image-strategy-and-byo-contract.md
 [adr2]: ../docs/adr/0002-a-run-executes-as-a-kubernetes-job.md
 [22]: https://github.com/nissessenap/the-implementer/issues/22
+[28]: https://github.com/nissessenap/the-implementer/issues/28
+[6]: https://github.com/nissessenap/the-implementer/issues/6
 [bubblewrap#745]: https://github.com/containers/bubblewrap/issues/745
 [gv13438]: https://github.com/google/gvisor/issues/13438
 [gv13532]: https://github.com/google/gvisor/issues/13532
