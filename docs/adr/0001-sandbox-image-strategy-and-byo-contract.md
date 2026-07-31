@@ -67,6 +67,46 @@ We ship only the language images we actually dogfood, starting with **Go**.
 Adding Python later is a four-line Dockerfile, which is the definition of not
 needing it now.
 
+### Container runtimes belong in a language image, not the base
+
+The base carries no container runtime. A language image may add one, and the **Go
+image does** — as the worked example of a derivative that is more than an
+`apt-get` line. That example is worth more than the capability: other orgs derive
+from this contract, so a real demonstration of adding something awkward is
+documentation that compiles.
+
+Measured in [issue #28][dind] and [the k3s spike][k3sspike]: rootless Docker runs
+at uid 1000, unprivileged, on the plain `gvisor` RuntimeClass, and a service in an
+inner container is reachable from the agent process — but only when the **whole
+phase script** runs inside `rootlesskit`, not just `dockerd`. Three consequences
+follow, and they are the reason this is not in the base.
+
+**It is not just a package list.** Past `docker-cli`, `dockerd`, `containerd`,
+`runc`, `rootlesskit`, `slirp4netns`, `fuse-overlayfs` and `uidmap`, the image
+needs `/etc/subuid` and `/etc/subgid` ranges for uid 1000 plus privileged
+`newuidmap`/`newgidmap`. Three attempts to graft the working setup onto our base
+failed on progressively deeper pieces of exactly that plumbing.
+
+**Wrapping is opt-in per run, and defaults off.** Inside `rootlesskit` a process
+reads its own uid as 0. The pod is still uid 1000 to gVisor and to the kernel, but
+the agent CLI's root gate trips, and bubblewrap is at risk for the same reason it
+fails as uid 0 ([issue #22][verify]). Making the wrap a per-run flag means
+carrying the runtime costs nothing until a run asks for it, and every run that
+does not keeps the run-time posture below fully intact. **Not yet measured:
+whether bubblewrap works inside `rootlesskit`.** That must be settled before the
+wrap is used for real.
+
+**Inner containers get no bridge network.** Creating one writes
+`/proc/sys/net/ipv4/ip_forward`, which is EPERM for an unprivileged user namespace
+under gVisor. So containers run with `--network=host` and talk over `localhost`;
+there is no `docker run -p`, and `docker build` needs `--network=none` together
+with `--feature containerd-snapshotter=false`.
+
+Toolchain detection is deliberately **not** extended to cover this. Judging
+whether a repository wants a container runtime needs far more of the repository
+than the single `GET /contents/` call [ADR 0003][adr3] makes, and it would be
+wrong silently — the failure class that ADR exists to avoid.
+
 ### The contract is the deliverable, not the image set
 
 **The base image's Dockerfile *is* the contract.** An organization either:
@@ -98,6 +138,7 @@ forced to abandon it and inherit from ours.
 | **Baked skills at a read-only path** | See below |
 | **The phase script at a known path** | See below |
 | Explicitly **not** required: `tar`, `chown`, `touch`, `rsync`, `zsh`, `sudo`, node/npm | We never use pod exec, so nothing in-image serves our control plane |
+| Explicitly **not** required: a container runtime | A language image may add one — the Go image does. See above |
 | Explicitly **nothing about the network** | Egress belongs to the pod's environment |
 | Explicitly **no credentials** | Injected at run time, never baked |
 
@@ -361,6 +402,7 @@ claimed and which the base image does not currently provide — see [issue
 [verify]: https://github.com/nissessenap/the-implementer/issues/22
 [dind]: https://github.com/nissessenap/the-implementer/issues/28
 [k3sspike]: https://github.com/nissessenap/the-implementer/pull/27
+[adr3]: 0003-toolchain-detection-and-image-selection.md
 [bw745]: https://github.com/containers/bubblewrap/issues/745
 [gv13438]: https://github.com/google/gvisor/issues/13438
 [gv13347]: https://github.com/google/gvisor/pull/13347
