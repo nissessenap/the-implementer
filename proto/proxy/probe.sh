@@ -73,6 +73,45 @@ kubectl -n "$NS" run "$POD" --image=golang:1.25 --restart=Never --attach --rm \
     env -u https_proxy -u HTTPS_PROXY go list -m -versions golang.org/x/text | head -1
   ' || echo "!!! probe pod exited non-zero (see output above)"
 
+# The Go half above can only reach a repo that does not exist, so it stops at a
+# status code. This one is the real thing: a private Python package actually
+# installed into a pod holding no GCP credential of any kind. Paths come from the
+# gitignored env file — the repo is a customer's, and none of it belongs in git.
+if [[ -n ${GAR_PY_REPO:-} && -n ${GAR_PY_REGION:-} && -n ${GAR_PY_PACKAGE:-} ]]; then
+  PY_INDEX=https://$GAR_PY_REGION-python.pkg.dev/$GAR_PROJECT/$GAR_PY_REPO/simple/
+  echo
+  echo "==> #34: pip install from private Artifact Registry, no credential in the pod"
+  kubectl -n "$NS" delete pod proxy-probe-py --ignore-not-found --wait >/dev/null
+  kubectl -n "$NS" run proxy-probe-py --image=python:3.13-slim --restart=Never --attach --rm \
+    --env=https_proxy="$PROXY" --env=HTTPS_PROXY="$PROXY" \
+    --env=CA_PEM="$CA" --env=PY_INDEX="$PY_INDEX" --env=PY_PKG="$GAR_PY_PACKAGE" \
+    --command -- sh -c '
+      cat /etc/ssl/certs/ca-certificates.crt > /tmp/bundle.crt
+      printf "%s\n" "$CA_PEM" >> /tmp/bundle.crt
+      export SSL_CERT_FILE=/tmp/bundle.crt CURL_CA_BUNDLE=/tmp/bundle.crt
+      # pip carries its own CA bundle and ignores SSL_CERT_FILE entirely.
+      export PIP_CERT=/tmp/bundle.crt
+
+      # Same differential as the Go half, through pip rather than curl: this image
+      # has no curl, and a silently-missing binary is worse than no probe.
+      # ponytail: written out twice rather than wrapped in a helper. --no-deps is an
+      # `install` option, not a global one, and a wrapper that reorders them fails
+      # in a way that reads exactly like a credential problem.
+      PIPQ="--quiet --disable-pip-version-check"
+      env -u https_proxy -u HTTPS_PROXY \
+        pip $PIPQ install --no-deps --index-url "$PY_INDEX" --target /tmp/direct "$PY_PKG" \
+          >/tmp/direct.err 2>&1 \
+        && echo "PROBE gar-py-direct   INSTALLED (unexpected — the pod holds no credential)" \
+        || echo "PROBE gar-py-direct   refused: $(grep -oiE "401|403|denied|authenticat[a-z]*" /tmp/direct.err | head -1)"
+
+      # ...and the thing that actually matters: a real install of a real private
+      # package, by a pod that cannot authenticate to Artifact Registry at all.
+      pip $PIPQ install --no-deps --index-url "$PY_INDEX" --target /tmp/site "$PY_PKG" \
+        && echo "PROBE gar-py-install  ok ($(ls /tmp/site | head -3 | tr "\n" " "))" \
+        || echo "PROBE gar-py-install  FAILED"
+    ' || echo "!!! python probe pod exited non-zero"
+fi
+
 echo
 echo "==================== PROXY LOG (the actual evidence) ===================="
 kubectl -n "$NS" logs deploy/proto-proxy --tail=80 | grep -E 'CONNECT|MITM|->' || true

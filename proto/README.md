@@ -787,13 +787,58 @@ a decision about *which* hosts get *which* credential.
 ./proxy/up.sh && ./proxy/probe.sh    # GAR_REGION / GAR_REPO / GAR_MODULE override
 ```
 
-### ⚠️ There is no GAR Go repository to point this at, so `go mod download` is unproven
+### ✅ Proven end to end — a private package installed into a pod with no GCP credential
 
-Say this first, because it bounds everything below. `gcloud artifacts repositories
-list` against the project this prototype uses returns **zero repositories, across
-all locations** — not "no Go repo", *no repo of any kind*. The obvious shared
-candidate (`kognic-artifacts`) is empty too. The ticket said not to create one, so
-what follows proves the **injection**, not the **fetch**.
+The strongest result in this file, and it took a correction to get to. The first
+pass reported `gcloud artifacts repositories list` returning **zero repositories**
+and concluded the fetch was unprovable; that was wrong — the project has plenty.
+None of them are **Go** repos, which is the part that was true and the part that
+matters, because the prototype only recognised `{region}-go.pkg.dev`.
+
+Artifact Registry's Python endpoint is `{region}-python.pkg.dev` — already covered
+by the `*.pkg.dev` SAN, but not by `credFor`, so it was being intercepted and
+forwarded anonymously. Measured before changing anything: the Python index accepts
+a **plain bearer** exactly like the Go endpoint (anonymous 401, garbage bearer 401,
+`Authorization: Bearer <gcp-token>` 200, basic `oauth2accesstoken:<token>` also
+200). So one `credFor` arm covers both and no second credential shape was needed.
+
+One pod, `python:3.13-slim`, `https_proxy` and the proxy's CA and **nothing else** —
+no key file, no `gcloud`, no `.netrc`, no `GOOGLE_APPLICATION_CREDENTIALS`:
+
+```
+PROBE gar-py-direct   refused: 401
+PROBE gar-py-install  ok (<pkg> <pkg>-0.6.2.dist-info tools)
+```
+
+Direct is a 401. Through the proxy the same `pip install` **completes** — a real
+private wheel, unpacked on disk. That is the fetch, not a status code.
+
+The proxy's log shows the whole shape, including a redirect nobody predicted:
+
+```
+MITM …-python.pkg.dev GET /…/simple/<pkg>/                  -> 200 auth=gcp-attached
+MITM …-python.pkg.dev GET /…/<pkg>-0.6.2-…-linux_x86_64.whl -> 307 auth=gcp-attached
+MITM …-python.pkg.dev GET /artifacts-downloads/namespaces/… -> 200 auth=gcp-attached
+```
+
+**The 307 stays on the same host**, so the redirect target is still on the cert,
+still intercepted, and still gets a token — which it needs. Worth noting against
+the Docker worry below: an artifact store that redirects *off*-host would land on a
+name the cert does not cover, fall through to the plain `CONNECT` tunnel, and
+receive nothing. The SAN list is doing structural work there, not just naming work.
+
+Paths (project, region, repository, package) live only in the gitignored
+`proto/.vertex.env`, as `GAR_PY_REGION` / `GAR_PY_REPO` / `GAR_PY_PACKAGE`. The
+probe skips silently when they are unset. A customer's registry layout does not
+belong in this repo.
+
+### ⚠️ `go mod download` specifically is still unproven
+
+There is no Go repository in the project, so the Go path stops where it did: a
+`404` from a repository that does not exist. The credential mechanism is identical
+and now demonstrated against a real repository through Python, so this is a gap in
+coverage rather than a gap in confidence — but it is a gap, and one Go repo with
+one module in it would close it.
 
 ### ✅ The injection works: the same URL is 401 direct and 404 proxied
 

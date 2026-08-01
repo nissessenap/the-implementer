@@ -105,10 +105,13 @@ func TestIntercepts(t *testing.T) {
 // challenge/response dance a header injection would get wrong.
 func TestCredFor(t *testing.T) {
 	for host, want := range map[string]string{
-		"github.com":                 "github",
-		"api.github.com":             "github",
-		"raw.githubusercontent.com":  "github",
-		"europe-north1-go.pkg.dev":   "gar",
+		"github.com":                   "github",
+		"api.github.com":               "github",
+		"raw.githubusercontent.com":    "github",
+		"europe-north1-go.pkg.dev":     "gar",
+		"europe-north1-python.pkg.dev": "gar",
+		// on the *.pkg.dev cert, deliberately unrecognised: its blob fetches
+		// redirect to pre-signed storage URLs that must not carry our token.
 		"us-central1-docker.pkg.dev": "none",
 	} {
 		if got := credFor(host); got != want {

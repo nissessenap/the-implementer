@@ -275,12 +275,18 @@ func (ic *interceptor) intercepts(host string) bool {
 // credFor picks the credential action by hostname. A switch, not a registry:
 // there are two credentials and adding a third is three lines.
 //
-//	gar     Artifact Registry Go module endpoint -> attach the proxy's GCP token
+//	gar     Artifact Registry Go/Python endpoints -> attach the proxy's GCP token
 //	github  GitHub -> swap the sentinel for the real installation token
 //	none    on the cert but not recognised: terminate, add nothing, log it
+//
+// An allowlist of endpoints whose auth was actually measured, not a denylist of
+// `-docker.pkg.dev`. Both Go and Python take a plain bearer, verified. Docker is
+// excluded for a reason that would not survive a denylist: its blob fetches
+// redirect to pre-signed storage URLs that must NOT carry our token.
 func credFor(host string) string {
 	switch {
-	case strings.HasSuffix(host, "-go.pkg.dev"):
+	case strings.HasSuffix(host, "-go.pkg.dev"),
+		strings.HasSuffix(host, "-python.pkg.dev"):
 		return "gar"
 	case strings.HasSuffix(host, "github.com"), strings.HasSuffix(host, "githubusercontent.com"):
 		return "github"
