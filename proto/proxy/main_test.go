@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"encoding/base64"
+	"net/http"
+	"strings"
+	"testing"
+)
 
 // The only non-trivial logic in the proxy is turning what Claude Code appends to
 // ANTHROPIC_VERTEX_BASE_URL into a real Vertex URL. Get that wrong and every model
@@ -24,5 +29,48 @@ func TestVertexRewrite(t *testing.T) {
 		if host != c.wantHost || p != c.wantPath {
 			t.Errorf("%s\n got  %s %s\n want %s %s", c.in, host, p, c.wantHost, c.wantPath)
 		}
+	}
+}
+
+// The other non-trivial bit: the sentinel swap (issue #34). It is the only place
+// the real GitHub token exists, and getting it wrong is either a broken run or a
+// leaked credential — neither of which a cluster is a pleasant place to discover.
+func TestSwapAuth(t *testing.T) {
+	const sent, tok = "proxy-injected", "ghs_REALTOKEN"
+	basic := func(u, p string) string {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(u+":"+p))
+	}
+	for _, c := range []struct{ name, in, wantVerdict, wantOut string }{
+		// git, from `git clone https://x-access-token:SENTINEL@github.com/...`
+		{"git basic password", basic("x-access-token", sent), "basic-swapped", basic("x-access-token", tok)},
+		// git also accepts the token as the username
+		{"git basic username", basic(sent, ""), "basic-swapped", basic("x-access-token", tok)},
+		// gh, from GH_TOKEN
+		{"gh token", "token " + sent, "token-swapped", "token " + tok},
+		{"bearer", "Bearer " + sent, "bearer-swapped", "Bearer " + tok},
+		// anything that is not the sentinel passes through untouched
+		{"foreign basic", basic("x-access-token", "ghp_SMUGGLED"), "basic-not-sentinel", basic("x-access-token", "ghp_SMUGGLED")},
+		{"foreign token", "token ghp_SMUGGLED", "token-not-sentinel", "token ghp_SMUGGLED"},
+		{"absent", "", "none", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := http.Header{}
+			if c.in != "" {
+				h.Set("Authorization", c.in)
+			}
+			if got := swapAuth(h, sent, tok); got != c.wantVerdict {
+				t.Errorf("verdict = %q, want %q", got, c.wantVerdict)
+			}
+			if got := h.Get("Authorization"); got != c.wantOut {
+				t.Errorf("header = %q, want %q", got, c.wantOut)
+			}
+		})
+	}
+
+	// The sentinel must never reach GitHub silently, and the real token must never
+	// be logged. Both are properties of the verdict string, so assert on it.
+	h := http.Header{"Authorization": []string{"token " + sent}}
+	if v := swapAuth(h, sent, tok); strings.Contains(v, tok) || strings.Contains(v, sent) {
+		t.Errorf("verdict %q leaks a credential", v)
 	}
 }

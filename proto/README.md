@@ -36,7 +36,8 @@ Knobs: `RUNTIME=gvisor|gvisor-dind|none`, `ROOT=1` (uid 0), `SECCOMP=`,
 Files: `Dockerfile` (ADR 0001 contract), `phase.sh` (the run plan, as the pod's
 `command`), `job.yaml` (ADR 0002 primitive + ADR 0001 runtime posture), `go.sh`
 (stands in for the Go orchestrator), `kubeconf.sh` (the loopback-only guard, in
-one place), `dind.sh` (Docker-in-gVisor probe), `proxy/` (the credential proxy).
+one place), `dind.sh` (Docker-in-gVisor probe), `proxy/` (the credential proxy,
+including `ca.sh` — cert-manager and the private CA).
 
 ## Host setup: gVisor on k3s
 
@@ -629,10 +630,148 @@ arise, so it was not worth a run.
 
 ### ➖ What this does not answer
 
-TLS interception, cert-manager, the GitHub sentinel swap, GAR credential injection,
-egress allowlisting, `NetworkPolicy` enforcement — all still the termination ticket.
+TLS interception, cert-manager and the GitHub sentinel swap — answered since, in the
+[#34][34] section below. GAR credential injection, egress allowlisting and
+`NetworkPolicy` enforcement are still open.
 Also untested: Workload Identity itself (needs GKE), and whether the ~23% is
 proxy or provider.
+
+## proxy/ — can the GitHub token stop entering the sandbox? (issue [#34][34])
+
+[#33][33] terminated the *model* credential at the proxy and dodged TLS entirely
+with an `http://` base URL. That dodge is unavailable here: the sandbox believes it
+is talking to `github.com`, so the proxy has to present a certificate for that name
+and the sandbox has to trust whoever signed it.
+
+Scope was deliberately one mechanic. Everything else #34 inherits — push-branch
+enforcement, GAR injection, KMS JWT signing, `NetworkPolicy`, egress allowlisting,
+and *who mints* the installation token — was left alone, because all of it is cheap
+to decide once the pipe exists and expensive to argue before.
+
+```sh
+./proxy/ca.sh                 # cert-manager + the private CA, standalone
+PREFLIGHT_ONLY=1 VERTEX=1 RUNTIME=gvisor ./go.sh nissessenap/tmp-test-repo 1
+```
+
+The sandbox's `GH_TOKEN` is the literal string `proxy-injected`. Nothing else
+changed in the run plan's credential path — `phase.sh` still builds
+`https://x-access-token:${GH_TOKEN}@github.com/…`, exactly as [#34][34] predicted
+the seam would behave.
+
+### ✅ The whole thing works, and the sandbox holds no GitHub credential either
+
+Five probes, all free, no agent turn:
+
+```
+PROBE proxy-ca         trusted (151 certs)
+PROBE https_proxy      http://proto-proxy…:8080 :: git=ok gh=ok
+PROBE gh-token         sentinel=proxy-injected rate_limit=5000
+PROBE git-basic        receive-pack=200
+PROBE git-sentinel     clone=ok push-dry-run=ok
+```
+
+`rate_limit=5000` is the assertion that matters: GitHub gives 60/h anonymous and
+5000/h authenticated. The sandbox sent a worthless string and got the authenticated
+number back, which can only happen if the proxy substituted a real token *inside* a
+TLS session the sandbox believed was GitHub's.
+
+The proxy's own log is the other half:
+
+```
+MITM github.com     handshake ok
+MITM api.github.com GET  /rate_limit                       -> 200 auth=token-swapped
+MITM github.com     GET  /…/info/refs (receive-pack)       -> 401 auth=none
+MITM github.com     GET  /…/info/refs (receive-pack)       -> 200 auth=basic-swapped
+```
+
+### ✅ `git` and `gh` both honour the CA bundle — but they need different variables
+
+[ADR 0001][adr1] ships the trust seam as `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`
+and #34 asked whether it actually reaches `git` and `gh` rather than just the agent.
+It does, but only because `phase.sh` sets four variables, not one:
+
+| tool | reads |
+|---|---|
+| `gh` (Go `crypto/x509`) | `SSL_CERT_FILE` |
+| `git` (libcurl) | `GIT_SSL_CAINFO` |
+| `curl` | `CURL_CA_BUNDLE` |
+| agent CLI (Node) | `NODE_EXTRA_CA_CERTS` |
+
+The trap is that the first three **replace** the trust store rather than adding to
+it. Pointing them at `ca.crt` alone leaves the sandbox unable to verify anything
+else on the internet — so the bundle is `ca-certificates.crt` *concatenated* with
+`ca.crt`, assembled into `/tmp` because `/etc/ssl/certs` is read-only at run time.
+`NODE_EXTRA_CA_CERTS` is the one that is genuinely additive. Three lines of run
+plan; in production the image ships the bundle or an initContainer writes it.
+
+### ⚠️ `git` does not send credentials preemptively — the swap must survive a 401
+
+The single most transferable finding, and one a header-only proxy would get wrong.
+
+`curl -u` sends `Authorization: Basic` on the first request. **`git` does not**,
+even with the token in the URL's userinfo: it makes an anonymous request, takes the
+`401`, and only then retries with basic auth. Both round trips are visible above.
+A proxy that swaps on the first request of a connection, or that treats an
+unauthenticated request as "no credential involved", silently breaks `git push`
+while `gh` keeps working.
+
+Also worth naming: on a **public** repo `git clone` authenticates not at all
+(`auth=none` throughout). The credential only appears on the push handshake. Any
+future push-branch enforcement therefore hangs off `service=git-receive-pack`, not
+off "requests that carry a token".
+
+### ✅ The sentinel swap needs two shapes, and [#33][33] only ever produced one
+
+The [#33][33] handoff flagged this and it was right. `swapAuth` handles:
+
+```
+Authorization: Basic base64(x-access-token:SENTINEL)   git, from the clone URL
+Authorization: token|Bearer SENTINEL                   gh, from GH_TOKEN
+```
+
+git also accepts the token as the *username* half, so both are matched. A
+credential that is not the sentinel is passed through untouched and logged as
+`basic-not-sentinel` — swallowing a smuggled credential would only hide it.
+`main_test.go` covers all of it, including an assertion that no verdict string
+ever contains a credential, since these lines are the run's audit trail.
+
+### ✅ cert-manager is the right shape, and the SAN list is the only config
+
+`ca.sh` installs cert-manager v1.21.1 and creates the two-Issuer chain a private CA
+needs — `selfSigned` Issuer → CA `Certificate` → `ca` Issuer → leaf. A self-signed
+*leaf* is not a CA and nothing chains to it; that is the one shape worth knowing
+before writing the chart.
+
+The leaf carries five SANs (`github.com`, `api.github.com`, `codeload.`, `objects.`,
+`raw.githubusercontent.com`) and **the proxy reads its intercept list back off its
+own certificate**. A host it cannot present a cert for is a host it must not
+intercept, so the two cannot drift apart and there is no second list to maintain.
+Everything not on it still gets the plain `CONNECT` tunnel from [#33][33].
+
+Distribution is a `ConfigMap` holding only `ca.crt`; the key never leaves the
+proxy's Secret. cert-manager's `trust-manager` does exactly this in production and
+was not worth a second install to learn.
+
+### ➖ Cost: not measurable against the noise
+
+A handshake plus one extra TLS termination per connection. Against 150–350 ms
+GitHub round trips it does not show up, and the interesting number ([#33][33]'s
+confounded +23%) is a model-call figure this does not touch.
+
+### ➖ What this does not answer
+
+**Who mints the token** — orchestrator-mints-and-hands-over vs proxy-mints is still
+open and this prototype deliberately does not discriminate: `up.sh` puts a PAT in a
+Secret, which is neither. It is now a cheap question, because the swap point is
+proven and both designs feed the same `swapAuth`.
+
+Untouched, and each one now independently additive: push-branch enforcement (the
+actual prize — hang it off `git-receive-pack`), GAR credential injection, KMS JWT
+signing, egress allowlisting, `NetworkPolicy`. Also untested: certificate rotation
+across a run (cert-manager renews at 2/3 of a 720h lifetime; the longest run so far
+is 249s), and HTTP/2 — the proxy forces HTTP/1.1 upstream because it writes
+responses back verbatim, which no client has yet minded.
+
 
 Versions: Claude Code `2.1.220`, `golang.org/x/oauth2 v0.36.0`, Go 1.25,
 `gcr.io/distroless/static-debian12:nonroot`, runsc `release-20260727.0`,
@@ -643,6 +782,7 @@ k3s `v1.36.2+k3s1`.
 [13]: https://github.com/nissessenap/the-implementer/issues/13
 [14]: https://github.com/nissessenap/the-implementer/issues/14
 [33]: https://github.com/nissessenap/the-implementer/issues/33
+[34]: https://github.com/nissessenap/the-implementer/issues/34
 
 [adr1]: ../docs/adr/0001-sandbox-image-strategy-and-byo-contract.md
 [adr2]: ../docs/adr/0002-a-run-executes-as-a-kubernetes-job.md

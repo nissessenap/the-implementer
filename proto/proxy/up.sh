@@ -19,13 +19,23 @@ ADC=${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_default_c
 QUOTA_PROJECT=${VERTEX_PROJECT:-}
 grep -q '"type": *"authorized_user"' "$ADC" || QUOTA_PROJECT=""
 
+# Issue #34: the proxy also terminates GitHub's TLS, so it needs a cert for
+# github.com and the real installation token. Both live here and only here.
+GH_TOKEN_SENTINEL=${GH_TOKEN_SENTINEL:-proxy-injected}
+GH_TOKEN_VALUE=${GH_PAT:-$(gh auth token)}
+
 echo "==> build proxy"
 docker build -q -t "$IMG" "$DIR"
 docker save "$IMG" | sudo k3s ctr images import - >/dev/null
 
-kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+"$DIR/ca.sh"
+
 kubectl -n "$NS" delete secret proto-adc --ignore-not-found >/dev/null
 kubectl -n "$NS" create secret generic proto-adc --from-file=adc.json="$ADC" >/dev/null
+kubectl -n "$NS" create secret generic proto-gh \
+  --from-literal=GH_TOKEN="$GH_TOKEN_VALUE" \
+  --from-literal=GH_TOKEN_SENTINEL="$GH_TOKEN_SENTINEL" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 sed -e "s|__IMG__|$IMG|" -e "s|__QUOTA_PROJECT__|$QUOTA_PROJECT|" \
     "$DIR/proxy.yaml" | kubectl apply -f - >/dev/null

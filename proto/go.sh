@@ -48,7 +48,14 @@ fi
 if [[ -z "$PREFLIGHT_ONLY" && -z "$VERTEX" ]]; then
   : "${CLAUDE_CODE_OAUTH_TOKEN:?export it, or write it to proto/.token — get one with: claude setup-token}"
 fi
-GH_TOKEN_VALUE=${GH_PAT:-$(gh auth token)}
+# Issue #34: with the proxy up, the sandbox's GH_TOKEN is a *sentinel*. The real
+# installation token never enters the pod — the proxy swaps it in after
+# terminating GitHub's TLS. If the run clones and pushes, the swap worked.
+if [[ -n $VERTEX ]]; then
+  GH_TOKEN_VALUE=${GH_TOKEN_SENTINEL:-proxy-injected}
+else
+  GH_TOKEN_VALUE=${GH_PAT:-$(gh auth token)}
+fi
 
 echo "==> build"
 docker build -q -t "$IMG" "$DIR"
