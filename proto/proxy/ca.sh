@@ -33,6 +33,14 @@ kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/d
 # api.github.com      gh
 # codeload / objects / raw   tarballs, LFS, release assets — cheap to include now,
 #                     expensive to discover missing halfway through a run.
+# *.pkg.dev           Artifact Registry (issue #34). A wildcard, because the Go
+#                     endpoint is {region}-go.pkg.dev and pinning a region here
+#                     would reintroduce exactly the region config #33 got rid of.
+#                     `*-go.pkg.dev` would be tighter and does not work: crypto/x509
+#                     (and every other TLS stack worth naming) only matches a
+#                     wildcard that is the *whole* leftmost label. So the cert is
+#                     wider than the credential rule, and main.go's credFor() is
+#                     what keeps -docker.pkg.dev from being handed a bearer token.
 kubectl apply -f - >/dev/null <<YAML
 apiVersion: cert-manager.io/v1
 kind: Issuer
@@ -58,7 +66,7 @@ spec:
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
-metadata: { name: proto-github, namespace: $NS }
+metadata: { name: proto-github, namespace: $NS } # ponytail: no longer only github
 spec:
   secretName: proto-github-tls
   duration: 720h
@@ -70,6 +78,7 @@ spec:
     - codeload.github.com
     - objects.githubusercontent.com
     - raw.githubusercontent.com
+    - "*.pkg.dev"
 YAML
 
 kubectl -n "$NS" wait --for=condition=Ready certificate/proto-ca --timeout=120s

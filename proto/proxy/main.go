@@ -8,6 +8,9 @@
 //	CONNECT github…   TLS *interception*: terminate with a cert-manager-issued cert
 //	                  for the name the sandbox asked for, swap the sentinel it holds
 //	                  for the real GitHub token, re-originate upstream. (#34)
+//	CONNECT *.pkg.dev same interception, different credential: attach the GCP token
+//	                  the proxy already holds, so `go mod download` reaches a private
+//	                  Artifact Registry Go repo from a sandbox with no GCP creds.
 //	CONNECT other     plain tunnel, so https_proxy still funnels the rest of the
 //	                  sandbox's egress through us. Every host is logged, which
 //	                  doubles as an egress inventory for the future allowlist.
@@ -31,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
 
@@ -104,7 +108,7 @@ func main() {
 	// present a cert for that name and the sandbox must trust whoever signed it.
 	var ic *interceptor
 	if dir := os.Getenv("TLS_DIR"); dir != "" {
-		ic = newInterceptor(dir, os.Getenv("GH_TOKEN_SENTINEL"), os.Getenv("GH_TOKEN"))
+		ic = newInterceptor(dir, os.Getenv("GH_TOKEN_SENTINEL"), os.Getenv("GH_TOKEN"), ts)
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -151,7 +155,7 @@ func main() {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
 				host, _, _ := net.SplitHostPort(r.Host)
-				if ic != nil && ic.hosts[host] {
+				if ic != nil && ic.intercepts(host) {
 					ic.connect(w, r, host)
 				} else {
 					tunnel(w, r)
@@ -211,18 +215,20 @@ func tunnel(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- issue #34 ---
 
-// interceptor terminates TLS for the GitHub hosts and swaps the sentinel the
-// sandbox holds for the real installation token. The sandbox therefore has no
-// GitHub credential either — only a string that is worthless anywhere else.
+// interceptor terminates TLS for the hosts its certificate covers and puts the
+// right credential on the request. Which credential is a property of the host:
+// GitHub gets the sentinel swap, Artifact Registry gets the GCP token the proxy
+// already holds for Vertex. The sandbox holds neither.
 type interceptor struct {
 	cert     tls.Certificate
 	hosts    map[string]bool
 	sentinel string
 	token    string
+	ts       oauth2.TokenSource
 	tr       *http.Transport
 }
 
-func newInterceptor(dir, sentinel, token string) *interceptor {
+func newInterceptor(dir, sentinel, token string, ts oauth2.TokenSource) *interceptor {
 	cert, err := tls.LoadX509KeyPair(dir+"/tls.crt", dir+"/tls.key")
 	if err != nil {
 		log.Fatalf("TLS_DIR=%s: %v", dir, err)
@@ -243,7 +249,7 @@ func newInterceptor(dir, sentinel, token string) *interceptor {
 	log.Printf("intercepting %v (cert expires %s) sentinel=%t token=%t",
 		leaf.DNSNames, leaf.NotAfter.Format(time.RFC3339), sentinel != "", token != "")
 	return &interceptor{
-		cert: cert, hosts: hosts, sentinel: sentinel, token: token,
+		cert: cert, hosts: hosts, sentinel: sentinel, token: token, ts: ts,
 		// HTTP/1.1 upstream on purpose: the response is written back to the client
 		// verbatim, and "HTTP/2.0 200" is not a valid HTTP/1.1 status line.
 		tr: &http.Transport{
@@ -251,6 +257,35 @@ func newInterceptor(dir, sentinel, token string) *interceptor {
 			TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
 		},
 	}
+}
+
+// intercepts answers "is this host on the certificate". Exact SANs are the #34
+// case; the wildcard branch exists because Artifact Registry's Go endpoint is
+// `{region}-go.pkg.dev` and pinning a region here would be a second place to
+// configure one. Same single-label rule crypto/x509 uses, so what we accept and
+// what a client will verify cannot disagree.
+func (ic *interceptor) intercepts(host string) bool {
+	if ic.hosts[host] {
+		return true
+	}
+	_, parent, ok := strings.Cut(host, ".")
+	return ok && ic.hosts["*."+parent]
+}
+
+// credFor picks the credential action by hostname. A switch, not a registry:
+// there are two credentials and adding a third is three lines.
+//
+//	gar     Artifact Registry Go module endpoint -> attach the proxy's GCP token
+//	github  GitHub -> swap the sentinel for the real installation token
+//	none    on the cert but not recognised: terminate, add nothing, log it
+func credFor(host string) string {
+	switch {
+	case strings.HasSuffix(host, "-go.pkg.dev"):
+		return "gar"
+	case strings.HasSuffix(host, "github.com"), strings.HasSuffix(host, "githubusercontent.com"):
+		return "github"
+	}
+	return "none"
 }
 
 func (ic *interceptor) connect(w http.ResponseWriter, r *http.Request, host string) {
@@ -301,8 +336,16 @@ func (ic *interceptor) serve(c net.Conn, host string) {
 		}
 		req.URL.Scheme, req.URL.Host, req.RequestURI = "https", host, ""
 
-		// THE POINT OF THE WHOLE TICKET.
-		verdict := swapAuth(req.Header, ic.sentinel, ic.token)
+		// THE POINT OF THE WHOLE TICKET — and the only thing that differs per host.
+		var verdict string
+		switch credFor(host) {
+		case "github":
+			verdict = swapAuth(req.Header, ic.sentinel, ic.token)
+		case "gar":
+			verdict = attachGCP(req.Header, ic.ts)
+		default:
+			verdict = "no-action"
+		}
 
 		start := time.Now()
 		resp, err := ic.tr.RoundTrip(req)
@@ -370,6 +413,39 @@ func swapAuth(h http.Header, sentinel, token string) string {
 		return lower + "-swapped"
 	}
 	return "scheme-" + lower
+}
+
+// ----------------------------------------------- issue #34, the GAR half ---
+
+// attachGCP puts the proxy's own GCP access token on an Artifact Registry request
+// and returns a log verdict — never the token.
+//
+// This is the whole GAR mechanic. `go mod download` against
+// https://{region}-go.pkg.dev/{project}/{repo}/... is ordinary HTTPS GET traffic
+// with a Bearer token; there is no challenge to answer and no sentinel to match,
+// so unlike swapAuth there is nothing to swap — the sandbox sends no credential at
+// all and the proxy supplies one. Same token as the Vertex half, so the only new
+// thing production needs is `roles/artifactregistry.reader` on the same identity.
+//
+// A credential the sandbox smuggled in is overwritten rather than passed through:
+// the opposite of swapAuth's rule, and deliberate — GAR has no equivalent of "a
+// token that is not ours might still be legitimately the user's", and leaving it
+// would just 401.
+func attachGCP(h http.Header, ts oauth2.TokenSource) string {
+	if ts == nil {
+		return "unconfigured"
+	}
+	t, err := ts.Token()
+	if err != nil {
+		log.Printf("token refresh failed: %v", err)
+		return "gcp-token-failed"
+	}
+	had := h.Get("Authorization") != ""
+	h.Set("Authorization", "Bearer "+t.AccessToken)
+	if had {
+		return "gcp-replaced"
+	}
+	return "gcp-attached"
 }
 
 func envOr(k, d string) string {
