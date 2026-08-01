@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "blocked", "failed"],
+      "description": "completed = the work in the brief is done and committed. blocked = you could not proceed. failed = you tried and the result is not usable."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One or two sentences describing what you actually did or why you stopped."
+    },
+    "pr_title": {
+      "type": "string",
+      "description": "A conventional-commit style title for the pull request."
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Repo-relative paths you created or modified."
+    }
+  },
+  "required": ["status", "summary", "pr_title"],
+  "additionalProperties": false
+}
