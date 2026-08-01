@@ -1,0 +1,62 @@
+# PROTOTYPE — throwaway. Placeholders are substituted by up.sh.
+#
+# Not under gVisor, and that is the point: the proxy is not the sandbox. It is the
+# thing that holds the credential *because* the sandbox does not.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proto-proxy
+  namespace: implementer-proto
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: proto-proxy }
+  template:
+    metadata:
+      labels: { app: proto-proxy }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # distroless nonroot
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: proxy
+          image: __IMG__
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            # On k3s there is no metadata server, so Workload Identity is not
+            # available and the proxy reads a credential file. In production this
+            # is the KSA's WI binding and the file disappears. See issue #33.
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /creds/adc.json
+            # Only needed for a user ADC credential; a service account is billed
+            # against its own project. Empty means "don't send the header".
+            - name: GOOGLE_CLOUD_QUOTA_PROJECT
+              value: "__QUOTA_PROJECT__"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          volumeMounts:
+            - { name: creds, mountPath: /creds, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: creds
+          secret: { secretName: proto-adc }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proto-proxy
+  namespace: implementer-proto
+spec:
+  selector: { app: proto-proxy }
+  ports:
+    - { port: 8080, targetPort: 8080 }

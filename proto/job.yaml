@@ -56,6 +56,9 @@ spec:
           envFrom:
             - secretRef:
                 name: proto-creds
+            # Run knobs; also the Vertex + proxy config when VERTEX=1. See go.sh.
+            - configMapRef:
+                name: proto-env
           volumeMounts:
             - { name: home, mountPath: /home/agent }
             - { name: tmp, mountPath: /tmp }

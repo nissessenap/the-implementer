@@ -74,6 +74,40 @@ probe "rootfs" "$(touch /rootfs-probe 2>/dev/null && echo WRITABLE || echo read-
 probe "workspace" "$(touch "${WORKSPACE}/.probe" 2>/dev/null && echo writable || echo NOT-WRITABLE)"
 probe "home" "$(touch "${HOME:-/nonexistent}/.probe" 2>/dev/null && echo writable || echo NOT-WRITABLE)"
 
+# Issue #33. Two assertions, both free:
+#  1. the sandbox holds no model credential at all when routing via the proxy;
+#  2. https_proxy actually catches the tools. That the commands *succeed* proves
+#     little on an open network — the evidence is the proxy's own CONNECT log, so
+#     the point of running them here is to generate entries in it.
+#     `go` is probed separately (proto/proxy/probe.sh) rather than bloating this
+#     image with a toolchain it does not otherwise need.
+probe "model-creds" "vertex=${CLAUDE_CODE_USE_VERTEX:-0} base=${ANTHROPIC_VERTEX_BASE_URL:-none} oauth=${CLAUDE_CODE_OAUTH_TOKEN:+SET}${CLAUDE_CODE_OAUTH_TOKEN:-absent} apikey=${ANTHROPIC_API_KEY:+SET}${ANTHROPIC_API_KEY:-absent}"
+if [ -n "${https_proxy:-}" ]; then
+  PROBE_PROXY="git=$(git ls-remote https://github.com/git/git HEAD >/dev/null 2>&1 && echo ok || echo FAILED)"
+  PROBE_PROXY="$PROBE_PROXY gh=$(gh api rate_limit >/dev/null 2>&1 && echo ok || echo FAILED)"
+  probe "https_proxy" "${https_proxy} :: $PROBE_PROXY"
+fi
+
+# SMOKE=1: one agent turn and nothing else. Issue #33 needs to know that Claude
+# Code itself reaches the model through the proxy while holding no credential of
+# its own — that is a startup-and-one-request question, not an implement-an-issue
+# question, and this way it costs a fraction of a cent instead of a dollar.
+# --debug so the resolved provider, base URL and model land in the log.
+if [ -n "${SMOKE:-}" ]; then
+  say "agent smoke: one turn through ${ANTHROPIC_VERTEX_BASE_URL:-the default endpoint}"
+  SMOKE_START=$(date +%s)
+  set +e
+  claude -p 'Reply with exactly: SMOKE-OK' --debug \
+    --dangerously-skip-permissions --output-format json \
+    --max-budget-usd "${MAX_BUDGET_USD:-10}" --max-turns 1 > /tmp/smoke.json 2>/tmp/smoke.err
+  SMOKE_RC=$?
+  set -e
+  probe "smoke-rc" "$SMOKE_RC elapsed=$(( $(date +%s) - SMOKE_START ))s"
+  probe "smoke-result" "$(jq -c '{is_error, total_cost_usd, num_turns, result}' /tmp/smoke.json 2>/dev/null | cut -c1-300 || cut -c1-300 /tmp/smoke.json)"
+  # The provider/model the CLI actually resolved, which is the interesting half.
+  grep -iE 'vertex|aiplatform|model|provider' /tmp/smoke.err | tail -25 >&2 || true
+fi
+
 # Probe-only mode: everything above costs nothing, so it is worth running on its
 # own against different security contexts before spending a real agent run.
 if [ -n "${PREFLIGHT_ONLY:-}" ]; then
@@ -126,6 +160,7 @@ set +e
     --dangerously-skip-permissions \
     --output-format stream-json --verbose \
     --json-schema "$(cat /opt/result.schema.json)" \
+    --max-budget-usd "${MAX_BUDGET_USD:-10}" \
     --max-turns 200
   echo $? > /tmp/agent.rc
 } | tee "${WORKSPACE}/stream.jsonl"

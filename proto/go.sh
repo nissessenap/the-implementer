@@ -22,30 +22,30 @@ ROOT=${ROOT:-}
 RUNTIME=${RUNTIME:-}
 
 # ---------------------------------------------------------- cluster safety ---
-# This laptop's ~/.kube/config points at real GKE clusters. A prototype that
-# applies Jobs must not be one `kubectl config use-context` away from prod, so
-# it brings its own kubeconfig and refuses any API server that is not loopback.
-if [[ -z ${KUBECONFIG:-} ]]; then
-  KUBECONFIG="$DIR/.k3s.kubeconfig"
-  if [[ ! -r $KUBECONFIG ]]; then
-    sudo cat /etc/rancher/k3s/k3s.yaml > "$KUBECONFIG"
-    chmod 600 "$KUBECONFIG"
-  fi
+# shellcheck source=kubeconf.sh
+source "$DIR/kubeconf.sh"
+
+# ------------------------------------------------------------------ vertex ---
+# VERTEX=1 routes the agent's model calls through the credential proxy instead of
+# straight at the Anthropic API, so the sandbox holds no model credential at all.
+# Issue #33. The GCP project id comes from proto/.vertex.env (gitignored) or the
+# environment — deliberately not in any committed file.
+VERTEX=${VERTEX:-}
+if [[ -n $VERTEX ]]; then
+  # shellcheck disable=SC1091
+  [[ -r $DIR/.vertex.env ]] && source "$DIR/.vertex.env"
+  : "${VERTEX_PROJECT:?set VERTEX_PROJECT, or write it to proto/.vertex.env}"
+  VERTEX_REGION=${VERTEX_REGION:-global}
+  PROXY_HOST=proto-proxy.$NS.svc.cluster.local
+  VERTEX_PROJECT=$VERTEX_PROJECT "$DIR/proxy/up.sh"
 fi
-export KUBECONFIG
-SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-case $SERVER in
-  https://127.0.0.1:* | https://localhost:* | 'https://[::1]:'*) ;;
-  *) echo "REFUSING: API server '$SERVER' is not local k3s" >&2; exit 1 ;;
-esac
-echo "==> cluster $SERVER"
 
 # Credentials. Never baked, always injected — the one ADR 0001 rule the prototype
 # has no excuse to break.
 if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -r "$DIR/.token" ]]; then
   CLAUDE_CODE_OAUTH_TOKEN=$(tr -d '[:space:]' < "$DIR/.token")
 fi
-if [[ -z "$PREFLIGHT_ONLY" ]]; then
+if [[ -z "$PREFLIGHT_ONLY" && -z "$VERTEX" ]]; then
   : "${CLAUDE_CODE_OAUTH_TOKEN:?export it, or write it to proto/.token — get one with: claude setup-token}"
 fi
 GH_TOKEN_VALUE=${GH_PAT:-$(gh auth token)}
@@ -61,9 +61,43 @@ docker save "$IMG" | sudo k3s ctr images import - >/dev/null
 echo "==> namespace + secret"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" delete secret proto-creds --ignore-not-found >/dev/null
-kubectl -n "$NS" create secret generic proto-creds \
-  --from-literal=CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
-  --from-literal=GH_TOKEN="$GH_TOKEN_VALUE" >/dev/null
+# On VERTEX the agent credential is *omitted*, not blanked: that is the assertion.
+# If the run works, the sandbox demonstrably held no model credential.
+CREDS=(--from-literal=GH_TOKEN="$GH_TOKEN_VALUE")
+[[ -z $VERTEX ]] && CREDS+=(--from-literal=CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}")
+kubectl -n "$NS" create secret generic proto-creds "${CREDS[@]}" >/dev/null
+
+# Knobs go in a ConfigMap rather than more sed placeholders in job.yaml: a
+# multi-line env block does not template into a YAML list without pain, and
+# `envFrom` takes an always-present ConfigMap without a conditional.
+# Issue #12 budgets 10 USD per phase; #33 asks whether that still binds on Vertex.
+VENV=(--from-literal=MAX_BUDGET_USD="${MAX_BUDGET_USD:-10}"
+      --from-literal=SMOKE="${SMOKE:-}")
+if [[ -n $VERTEX ]]; then
+  VENV+=(
+    --from-literal=CLAUDE_CODE_USE_VERTEX=1
+    --from-literal=CLAUDE_CODE_SKIP_VERTEX_AUTH=1
+    # http:// on purpose — question 1 of #33. The sandbox sends no credential, so
+    # a plaintext in-cluster hop leaks nothing beyond the prompt.
+    --from-literal=ANTHROPIC_VERTEX_BASE_URL="http://${PROXY_HOST}:8080/vertex"
+    --from-literal=ANTHROPIC_VERTEX_PROJECT_ID="$VERTEX_PROJECT"
+    --from-literal=CLOUD_ML_REGION="$VERTEX_REGION"
+    # The same proxy is the forward proxy for git/gh/go. NO_PROXY must name the
+    # proxy itself or the base URL above gets tunnelled through the proxy to the
+    # proxy. Node reads the lowercase forms first; set both.
+    --from-literal=https_proxy="http://${PROXY_HOST}:8080"
+    --from-literal=HTTPS_PROXY="http://${PROXY_HOST}:8080"
+    --from-literal=no_proxy="$PROXY_HOST"
+    --from-literal=NO_PROXY="$PROXY_HOST"
+  )
+  # Vertex resolves `opus`/`sonnet` to its own defaults, so pin explicitly.
+  for v in ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+           ANTHROPIC_DEFAULT_HAIKU_MODEL; do
+    [[ -n ${!v:-} ]] && VENV+=(--from-literal="$v=${!v}")
+  done
+fi
+kubectl -n "$NS" create configmap proto-env "${VENV[@]}" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # The pod securityContext goes in as one flow mapping, so switching UID or
 # seccomp never turns into a YAML-indentation problem in sed.

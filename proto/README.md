@@ -20,12 +20,23 @@ PREFLIGHT_ONLY=1 ./go.sh nissessenap/tmp-test-repo 1
 PREFLIGHT_ONLY=1 RUNTIME=gvisor ROOT=1 SECCOMP=RuntimeDefault ./go.sh nissessenap/tmp-test-repo 1
 ```
 
+Routing the model calls through the credential proxy instead of straight at the
+Anthropic API, so the sandbox holds no model credential at all ([#33][33]):
+
+```sh
+printf 'VERTEX_PROJECT=your-gcp-project\n' > proto/.vertex.env   # gitignored
+VERTEX=1 RUNTIME=gvisor ./go.sh nissessenap/tmp-test-repo 1
+SMOKE=1 PREFLIGHT_ONLY=1 VERTEX=1 RUNTIME=gvisor ./go.sh …       # one turn, ~$0.12
+```
+
 Knobs: `RUNTIME=gvisor|gvisor-dind|none`, `ROOT=1` (uid 0), `SECCOMP=`,
-`PREFLIGHT_ONLY=1`, `BRANCH_SUFFIX=`, `JOB_SUFFIX=`.
+`PREFLIGHT_ONLY=1`, `VERTEX=1`, `SMOKE=1`, `MAX_BUDGET_USD=`, `BRANCH_SUFFIX=`,
+`JOB_SUFFIX=`.
 
 Files: `Dockerfile` (ADR 0001 contract), `phase.sh` (the run plan, as the pod's
 `command`), `job.yaml` (ADR 0002 primitive + ADR 0001 runtime posture), `go.sh`
-(stands in for the Go orchestrator), `dind.sh` (Docker-in-gVisor probe).
+(stands in for the Go orchestrator), `kubeconf.sh` (the loopback-only guard, in
+one place), `dind.sh` (Docker-in-gVisor probe), `proxy/` (the credential proxy).
 
 ## Host setup: gVisor on k3s
 
@@ -467,8 +478,171 @@ process, and the testcontainers shape works. But the path that achieves it costs
 uid-0-inside-the-namespace, which collides with two things ADR 0001 decided
 deliberately. That is a scope call, not a measurement — the measurement is done.
 
+## proxy/ — does the credential proxy work, and what does it cost? (issue [#33][33])
+
+[#14][14] put the proxy into MVP on its Vertex half: the sandbox holds **zero**
+Anthropic or GCP credential, and the proxy carries the identity. That rested on a
+first-party mechanism nobody had run. `proxy/` runs it.
+
+One Go binary, one port, two halves of the same question:
+
+| what | how |
+|---|---|
+| `POST /vertex/…` | `httputil.ReverseProxy` to `{loc}-aiplatform.googleapis.com`, attaching a GCP token from `golang.org/x/oauth2/google` ADC |
+| `CONNECT host:443` | plain tunnel, so `https_proxy` in the sandbox funnels `git`/`gh`/`go`. No TLS interception — that is the termination ticket |
+
+The proxy needs no region config: Claude Code puts the location in the request
+path, so `rewriteVertex` reads it back out (`main_test.go` covers the three host
+shapes — `global`, multi-region `eu`/`us`, regional).
+
+### ✅ It works — a real run on Vertex with no credential in the sandbox
+
+`VERTEX=1 RUNTIME=gvisor`, uid 1000, `readOnlyRootFilesystem`, against
+[tmp-test-repo#1][t1]. Preflight → clone → `/mattpocock-skills:implement` →
+commit → push, all model traffic over one plaintext in-cluster hop:
+
+| run | provider | model | elapsed | cost | CI |
+|---|---|---|---|---|---|
+| `implementer/issue-1-gvisor-nonroot` (baseline, [#22][22]) | direct API | CLI default | 202s | $0.88 | ✅ |
+| `implementer/issue-1-vertex` | **Vertex via proxy** | claude-sonnet-4-6 | **249s** | $1.02 | ❌ *see below* |
+
+The load-bearing probe is `model-creds`:
+
+```
+PROBE model-creds  vertex=1 base=http://proto-proxy…:8080/vertex oauth=absent apikey=absent
+```
+
+`go.sh` **omits** `CLAUDE_CODE_OAUTH_TOKEN` from the Secret on `VERTEX=1` rather
+than blanking it, so a working run is proof rather than an assertion. The sandbox's
+only credential is the GitHub token.
+
+Incidental robustness datapoint: `up.sh` rolled the proxy Deployment **mid-run**
+and the agent did not notice — Service DNS plus the CLI's own retry ladder covered
+it. Restarting the credential holder under a live run is survivable.
+
+### ✅ An `http://` base URL works — MVP needs no certs for this hop
+
+Question 1, answered yes. `ANTHROPIC_VERTEX_BASE_URL=http://proto-proxy…:8080/vertex`
+with `CLAUDE_CODE_SKIP_VERTEX_AUTH=1`; no TLS, no cert-manager, no
+`NODE_EXTRA_CA_CERTS`. The sandbox sends no credential over that hop, so plaintext
+leaks nothing beyond the prompt. **cert-manager stays out of MVP.**
+
+### ✅ SSE streaming survives `ReverseProxy` natively
+
+No `FlushInterval` tuning, no custom `http.Flusher` plumbing. A 60-token
+`:streamRawPredict` arrives as deltas ~20 ms apart, and the proxy's own log shows
+`ttfb=2.833s total=3.211s` — a buffering proxy would show those equal. Every
+`streamRawPredict` in the real run behaves the same, up to `total=56s` on the long
+turns while `ttfb` stayed ~1.5s.
+
+### ✅ `https_proxy` catches `git`, `gh` and `go`
+
+`proxy/probe.sh` runs a throwaway `golang:1.25` pod with nothing but `https_proxy`
+set — a toolchain in the sandbox image would cost 450 MB of apt to answer this
+once. The evidence is the proxy's own log, not the commands succeeding (direct
+egress is open on this cluster, so success alone proves nothing):
+
+```
+CONNECT proxy.golang.org:443 established     ← go get / go install
+CONNECT sum.golang.org:443 established       ← checksum db
+CONNECT github.com:443 established           ← git ls-remote, git clone
+CONNECT api.github.com:443 established       ← gh
+```
+
+All four go through the tunnel unprompted. That log doubles as the **egress
+inventory** the allowlisting ticket will start from.
+
+### ⚠️ The model pin is dictated by the project, and here it cost quality
+
+The GCP project used for this spike can invoke exactly two Claude models —
+measured, not read off a docs page, by a 1-token `:rawPredict` per pair through the
+proxy. Its id is deliberately nowhere in this repo; it lives in `proto/.vertex.env`,
+which is gitignored, and reaches the Job as a ConfigMap value.
+
+| location | invocable |
+|---|---|
+| `global`, `us-east5`, `europe-west1` | `claude-sonnet-4-6`, `claude-haiku-4-5@20251001` |
+
+Everything else 404s: `claude-opus-5`, `claude-sonnet-5`, `claude-opus-4-8`, and
+even `claude-sonnet-4-5@20250929`. Consequences:
+
+- Claude Code's Vertex default primary model **is** `claude-opus-5`, so an unpinned
+  deployment starts by falling back. Pinning is not optional here.
+- The `opus` **alias** must be remapped too (`ANTHROPIC_DEFAULT_OPUS_MODEL`), or any
+  subagent asking for opus 404s. Three variables, not one.
+- So the Helm values are `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, and they are a
+  **property of the customer's GCP project**, not of our release. The haiku pin is
+  load-bearing: the run's background traffic used it.
+
+And the cost is not only configuration. **This run pushed a red branch.** The agent
+wrote `TestMedian`, self-reported `status: completed`, and CI failed on its own
+test — a nil-versus-empty-slice comparison in the empty case:
+
+```
+--- FAIL: TestMedian/empty
+    calc_test.go:114: Median mutated input: got [], want []
+```
+
+Baseline runs on the direct API went green on this same issue. n=1, and the
+variable is the **model** rather than the proxy — Sonnet 4.6 because that is what
+the project has — so this is an observation, not a law. But it is the shape of the
+trade: "the sandbox holds no credential" is paid for in whatever models the
+customer's project has enabled. Separately, it is an argument for the run plan
+owning a test gate, since `status: completed` did not survive contact with `go test`.
+
+### ✅ `--max-budget-usd` still binds, at list rates
+
+`MAX_BUDGET_USD=0.001` on the smoke turn: `rc=1`, `is_error: true`, `result: null`,
+and `total_cost_usd: 0.115` still reported. At `10` the same turn returns
+`SMOKE-OK` and `rc=0`. So [#12][12]'s per-phase budget keeps working on Vertex —
+Claude Code computes cost locally from token counts at Anthropic list rates, which
+also means **it stops matching the GCP bill**. It is a runaway-agent guard, not an
+accounting figure, and it should be documented as one.
+
+### ➖ What the extra hop costs: not much, but the number is confounded
+
+The hop itself is a plaintext connection inside one node; the proxy's `ttfb`
+(0.9–2.6 s on `streamRawPredict`) is the Vertex round trip, not overhead. The
+honest end-to-end figure is **202s → 249s, about +23%** — and it bundles the proxy
+hop with a provider change *and* a model change. A clean proxy-only number would
+need the sandbox talking to Vertex directly, which is the posture this whole ticket
+exists to avoid. Recorded as an upper bound.
+
+For scale: gVisor alone already costs ~25% ([#22][22]), so sandbox plus proxy is
+roughly 1.5× the wall-clock of an unsandboxed direct-API run.
+
+### ⚠️ The proxy's own auth on k3s — and the quota-project trap
+
+No metadata server on k3s, so Workload Identity is unavailable and the proxy mounts
+a credential file (`up.sh` puts `~/.config/gcloud/application_default_credentials.json`
+into a Secret). Sanctioned by the ticket for the *proxy* and it must not leak to the
+sandbox side. It works: the pod logs `ADC ok, token type=Bearer` and refreshes
+itself for the run's duration.
+
+One trap this surfaced that production will not share: a user ADC credential
+(`type: authorized_user`) is billed against a **quota project**, so the proxy sends
+`X-Goog-User-Project`. `up.sh` sets it only when the credential file is
+`authorized_user`, because a service account does not need it. Whether omitting it
+actually fails here is **untested** — under Workload Identity the question does not
+arise, so it was not worth a run.
+
+### ➖ What this does not answer
+
+TLS interception, cert-manager, the GitHub sentinel swap, GAR credential injection,
+egress allowlisting, `NetworkPolicy` enforcement — all still the termination ticket.
+Also untested: Workload Identity itself (needs GKE), and whether the ~23% is
+proxy or provider.
+
+Versions: Claude Code `2.1.220`, `golang.org/x/oauth2 v0.36.0`, Go 1.25,
+`gcr.io/distroless/static-debian12:nonroot`, runsc `release-20260727.0`,
+k3s `v1.36.2+k3s1`.
+
 [t1]: https://github.com/nissessenap/tmp-test-repo/issues/1
+[12]: https://github.com/nissessenap/the-implementer/issues/12
 [13]: https://github.com/nissessenap/the-implementer/issues/13
+[14]: https://github.com/nissessenap/the-implementer/issues/14
+[33]: https://github.com/nissessenap/the-implementer/issues/33
 
 [adr1]: ../docs/adr/0001-sandbox-image-strategy-and-byo-contract.md
 [adr2]: ../docs/adr/0002-a-run-executes-as-a-kubernetes-job.md
