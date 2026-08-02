@@ -1,11 +1,46 @@
 # Context
 
 Domain glossary for `the-implementer`. Terms are added as architectural decisions
-land; see `docs/adr/` for the decisions themselves.
+land; see `docs/adr/` for the decisions themselves and
+[`docs/architecture.md`](docs/architecture.md) for everything that did not earn
+an ADR.
 
 `the-implementer` is a Go GitHub App and webhook receiver that launches isolated
 Kubernetes workloads running Claude Code headlessly to implement a GitHub issue,
 then produces a pull request.
+
+## Components
+
+**Orchestrator** — the Go process that turns a labelled issue into a pull
+request. A webhook front-end that creates one Job, plus an informer that watches
+Pods and acts on the terminal one. It holds no run state of its own: state lives
+in Kubernetes objects and GitHub, so **v1 has no database**. See
+[ADR 0004](docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md).
+
+**Credential proxy** — the Deployment every credential terminates at. The
+sandbox holds none: it sends unsigned model requests and a **sentinel** GitHub
+credential, and the proxy attaches the real ones. It is the only component with
+a cloud identity, and it is a separate pod rather than a sidecar because a
+sidecar shares the sandbox's network namespace and can be bypassed. See
+[ADR 0005](docs/adr/0005-credentials-terminate-at-the-credential-proxy.md).
+
+**Sentinel** — a worthless string standing where a credential would be
+(`GH_TOKEN=proxy-injected`). The proxy swaps it for the real token in flight.
+The point of the sentinel is that the sandbox's code path is *unchanged*: the
+phase script still builds an authenticated URL, the value is just no longer
+worth stealing.
+
+**Run identity** — `owner`, `repo` and `issue` in the Job's **annotations**, not
+its labels, because repository names exceed the 63-character label-value cap.
+The informer reads them to get back to the issue, and the proxy resolves them
+from a request's source pod IP to know which repository to mint for.
+Non-negotiable: mint for the annotation's repository, never for the one the
+request URL names.
+
+**Trust bundle** — the system CA bundle concatenated with the proxy's CA,
+assembled by the phase script at run-plan start. A bundle rather than a bare
+`ca.crt` because four of the five trust variables *replace* the trust store
+rather than adding to it.
 
 ## Sandbox and images
 

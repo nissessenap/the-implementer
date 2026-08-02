@@ -9,7 +9,7 @@ But instead of running `/implement` on your laptop, the implementer does it for 
 ## How it works
 
 1. A webhook event arrives (label applied, or the app user mentioned in a comment).
-2. A short-lived, narrowly-scoped GitHub installation token is minted for the run, and one isolated Kubernetes workload is created.
+2. One isolated Kubernetes workload is created. It carries no credentials — a short-lived, narrowly-scoped GitHub installation token is minted by the proxy, on demand, and never enters the sandbox.
 3. The workload's entrypoint is a **run plan**: a script that invokes `claude -p` once per phase, with deterministic steps in between. Each phase is a fresh process, so each gets a clean context.
 4. The agent commits and pushes its branch. It cannot open, comment on, approve, or merge a pull request.
 5. The orchestrator watches the workload to completion, reads the run's structured result, and opens the pull request itself.
@@ -20,7 +20,7 @@ The orchestrator is really a **controller with a webhook front-end** — so run 
 
 ## Design decisions
 
-Architecture is being worked out in the open. See **[the architecture map](https://github.com/nissessenap/the-implementer/issues/1)** for what's settled, what's still open, and the research behind each call. Decisions land as ADRs in `docs/adr/`.
+**[`docs/architecture.md`](docs/architecture.md) is the v1 architecture** — every decision, the operator prerequisites, what MVP deliberately leaves out, and what is decided but unmeasured. Decisions expensive to reverse are ADRs in [`docs/adr/`](docs/adr/); everything else lives in that document. [The architecture map](https://github.com/nissessenap/the-implementer/issues/1) is the route that produced them, with the research behind each call.
 
 Settled so far:
 
@@ -32,13 +32,13 @@ Settled so far:
 - **The proxy mints the GitHub token, and Cloud KMS signs the App JWT.** So the App private key exists only inside KMS, and what the proxy holds is a revocable, audit-logged signing *capability* rather than key bytes. KMS ties this to GCP, so the signing step stays behind a seam — a plain-key signer for non-GCP operators is a later addition, not a rewrite. [#36](https://github.com/nissessenap/the-implementer/issues/36).
 - **Scion is not a dependency.** [Scion](https://github.com/GoogleCloudPlatform/scion) evaluated agent-sandbox and deliberately removed it, and webhook-driven agent creation is an explicit non-goal in its design docs. It stays useful as prior art.
 
-Still open — don't build against these yet: egress allowlisting, and trigger details. (The Kubernetes primitive and sandbox image preparation are settled — see ADRs 0001–0003.)
+Nothing architectural is still open. Egress allowlisting and `NetworkPolicy` enforcement are *decided but not built* — MVP ships open egress, and the target shape is in [the architecture document](docs/architecture.md#7-network-egress).
 
 ## Container images
 
 Your organization probably has multiple languages, and what's pre-installed in a sandbox is up to you. The strategy is settled in [ADR 0001](docs/adr/0001-sandbox-image-strategy-and-byo-contract.md): one small base image, with per-language images as short derivatives, rather than the field's usual multi-language base plus a setup script. The BYO-image contract is the base Dockerfile itself, and it is deliberately small.
 
-Two hard constraints are already known. **The sandbox must run as a non-root user** — bubblewrap fails outright as uid 0 under gVisor. And it must **trust a private CA**, because the proxy terminates TLS for GitHub and the package registries; that turns out to need four environment variables rather than one, since most of them *replace* the system trust store rather than adding to it.
+Two hard constraints are already known. **The sandbox must run as a non-root user** — bubblewrap fails outright as uid 0 under gVisor. And it must **trust a private CA**, because the proxy terminates TLS for GitHub and the package registries; that turns out to need five environment variables rather than one, since all but one of them *replace* the system trust store rather than adding to it.
 
 ## Roadmap
 
