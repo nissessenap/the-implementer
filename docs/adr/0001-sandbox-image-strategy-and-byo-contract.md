@@ -135,6 +135,7 @@ forced to abandon it and inherit from ours.
 | **`gh`** | GitHub CLI operations inside the run |
 | **An agent CLI on `PATH`** | Deliberately engine-agnostic wording |
 | **`bubblewrap`** | Required by Claude Code's subprocess env scrubbing. The contract requires the **binary**, not a working network namespace — `--unshare-net` is broken under gVisor ([spike][k3sspike]) |
+| **A system CA bundle at `/etc/ssl/certs/ca-certificates.crt`** | The phase script concatenates the proxy's CA onto it ([issue #34][ghterm]) |
 | **Baked skills at a read-only path** | See below |
 | **The phase script at a known path** | See below |
 | Explicitly **not** required: `tar`, `chown`, `touch`, `rsync`, `zsh`, `sudo`, node/npm | We never use pod exec, so nothing in-image serves our control plane |
@@ -248,9 +249,12 @@ ticket rather than an unacknowledged hole.
   PodSpec field instead of something baked into the image.
 - **`DISABLE_AUTOUPDATER=1`.** Versions are pinned and the rootfs is read-only.
 - **CA trust without writing to `/etc`.** A proxy's CA is mounted as a file and
-  pointed at via `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`.
-  `update-ca-certificates` is never run. mTLS to the proxy, when it arrives, is
-  `CLAUDE_CODE_CLIENT_CERT` / `_KEY` — configuration, not a build change.
+  pointed at by environment variables; `update-ca-certificates` is never run.
+  ~~`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`.~~ **Amended by
+  [issue #34][ghterm]: it takes more variables than that, and pointing them at the
+  CA alone breaks the sandbox — see [the trust seam](#the-trust-seam-is-five-variables-and-most-of-them-replace-rather-than-add)
+  below.** mTLS to the proxy, when it arrives, is `CLAUDE_CODE_CLIENT_CERT` /
+  `_KEY` — configuration, not a build change.
 - **Subprocess env scrubbing stays on** (its default), which is why `bubblewrap`
   is a contract requirement. It strips Anthropic and cloud credentials from
   subprocess environments — the mitigation class for the Microsoft finding where
@@ -275,6 +279,52 @@ ticket rather than an unacknowledged hole.
 
 Dependency caches live on ephemeral volumes and die with the pod. Reusing them
 across runs is [issue #20][caches].
+
+### The trust seam is five variables, and most of them replace rather than add
+
+Added by [issue #34][ghterm], which put a real proxy CA in front of `git`, `gh`,
+`curl` and `pip` and measured what each one actually reads. This section is small
+but it is a **contract** clause: an image built to the two-variable wording above
+fails against the credential proxy, and it fails looking like a certificate
+problem rather than a documentation one.
+
+The tools share no convention:
+
+| tool | reads |
+|---|---|
+| `gh` (Go `crypto/x509`) | `SSL_CERT_FILE` |
+| `git` (libcurl) | `GIT_SSL_CAINFO` |
+| `curl` | `CURL_CA_BUNDLE` |
+| `pip` | `PIP_CERT` — carries its own bundle and ignores `SSL_CERT_FILE` entirely |
+| agent CLI (Node) | `NODE_EXTRA_CA_CERTS` |
+
+**Everything except `NODE_EXTRA_CA_CERTS` *replaces* the trust store rather than
+adding to it.** Pointing them at the proxy's `ca.crt` alone leaves the sandbox
+unable to verify anything else on the internet — a failure that surfaces far from
+its cause, on the first unrelated HTTPS call. So the value is a **bundle**: the
+system `ca-certificates.crt` concatenated with the proxy's CA. Only
+`NODE_EXTRA_CA_CERTS` is genuinely additive and takes the bare `ca.crt`.
+
+**The phase script assembles the bundle into `/tmp` at run-plan start.** Not the
+image, and not an initContainer:
+
+- The image *cannot* ship it. The CA is minted by cert-manager at install time, so
+  it is not knowable at build time. (An operator running a long-lived corporate CA
+  may bake it — the BYO contract permits that — but our images cannot.)
+- `/etc/ssl/certs` is read-only under `readOnlyRootFilesystem: true`, so
+  assembling in place is not an option regardless.
+- An initContainer buys nothing here and costs a shared `emptyDir` plus a second
+  home for the same three lines. The phase script is already baked into the image
+  and already versioned as a pair with the orchestrator, so it is the cheaper
+  place for a three-line concatenation. Verified in `proto/phase.sh` on the
+  [credential-proxy prototype][proxyproto].
+
+Two consequences for the contract. The base image must carry a system CA bundle at
+`/etc/ssl/certs/ca-certificates.crt` — implied by glibc plus `ca-certificates`, now
+stated because the phase script reads it. And the CA mount path is a **run-time**
+concern (the PodSpec's, like `fsGroup`), not something baked in: the phase script
+assembles the bundle only when the mount is present, so an image is equally valid
+in a cluster with no proxy.
 
 ### A preflight that actually runs
 
@@ -402,6 +452,8 @@ claimed and which the base image does not currently provide — see [issue
 [verify]: https://github.com/nissessenap/the-implementer/issues/22
 [dind]: https://github.com/nissessenap/the-implementer/issues/28
 [k3sspike]: https://github.com/nissessenap/the-implementer/pull/27
+[ghterm]: https://github.com/nissessenap/the-implementer/issues/34
+[proxyproto]: https://github.com/nissessenap/the-implementer/pull/35
 [adr3]: 0003-toolchain-detection-and-image-selection.md
 [bw745]: https://github.com/containers/bubblewrap/issues/745
 [gv13438]: https://github.com/google/gvisor/issues/13438
