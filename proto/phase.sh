@@ -18,6 +18,7 @@ PHASE=preflight
 PROBE_TERMLOG=untested
 PROBE_BWRAP=untested
 PROBE_SANDBOX=untested
+PROBE_CA=absent
 
 say()  { printf '\n=== %s\n' "$*" >&2; }
 probe() { printf 'PROBE %-16s %s\n' "$1" "$2" >&2; }
@@ -28,9 +29,10 @@ termlog() {
   jq -cn \
     --arg status "$1" --arg phase "$PHASE" --arg message "$2" \
     --arg termlog "$PROBE_TERMLOG" --arg bwrap "$PROBE_BWRAP" \
-    --arg sandbox "$PROBE_SANDBOX" \
+    --arg sandbox "$PROBE_SANDBOX" --arg ca "$PROBE_CA" \
     '{status:$status, phase:$phase, message:$message,
-      probes:{termination_log:$termlog, bubblewrap:$bwrap, sandbox:$sandbox}}' \
+      probes:{termination_log:$termlog, bubblewrap:$bwrap, sandbox:$sandbox,
+              proxy_ca:$ca}}' \
   | cut -c1-4000 > "$TERM_LOG" 2>/dev/null \
   || echo "!!! could not write $TERM_LOG" >&2
 }
@@ -43,6 +45,24 @@ for c in claude git gh jq bwrap; do
   command -v "$c" >/dev/null || die "image contract violation: $c not on PATH"
 done
 probe "image-contract" "OK ($(claude --version 2>&1 | head -1))"
+
+# Issue #34. The proxy terminates GitHub's TLS, so the sandbox must trust the CA
+# that signed its cert. Concatenated onto the system bundle rather than mounted
+# over it, because SSL_CERT_FILE and GIT_SSL_CAINFO *replace* the trust store
+# rather than adding to it — pointing them at ca.crt alone would leave the
+# sandbox unable to verify anything else on the internet.
+# ponytail: assembled here because /etc/ssl/certs is read-only at run time. In
+# production the image ships the bundle or an initContainer writes it; this is
+# the one line of the run plan the trust seam costs.
+if [ -f /run/proxy-ca/ca.crt ]; then
+  cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/ca-bundle.crt
+  export SSL_CERT_FILE=/tmp/ca-bundle.crt \
+         GIT_SSL_CAINFO=/tmp/ca-bundle.crt \
+         CURL_CA_BUNDLE=/tmp/ca-bundle.crt \
+         NODE_EXTRA_CA_CERTS=/run/proxy-ca/ca.crt
+  PROBE_CA="trusted ($(grep -c 'BEGIN CERTIFICATE' /tmp/ca-bundle.crt) certs)"
+fi
+probe "proxy-ca" "$PROBE_CA"
 
 # ADR 0001 / issue #22 question 1: is /dev/termination-log writable when the
 # root filesystem is read-only? The entire compact result channel depends on it.
@@ -73,6 +93,67 @@ probe "sandbox" "dmesg=${PROBE_SANDBOX:-<empty/denied>} kernel=$(uname -r)"
 probe "rootfs" "$(touch /rootfs-probe 2>/dev/null && echo WRITABLE || echo read-only)"
 probe "workspace" "$(touch "${WORKSPACE}/.probe" 2>/dev/null && echo writable || echo NOT-WRITABLE)"
 probe "home" "$(touch "${HOME:-/nonexistent}/.probe" 2>/dev/null && echo writable || echo NOT-WRITABLE)"
+
+# Issue #33. Two assertions, both free:
+#  1. the sandbox holds no model credential at all when routing via the proxy;
+#  2. https_proxy actually catches the tools. That the commands *succeed* proves
+#     little on an open network — the evidence is the proxy's own CONNECT log, so
+#     the point of running them here is to generate entries in it.
+#     `go` is probed separately (proto/proxy/probe.sh) rather than bloating this
+#     image with a toolchain it does not otherwise need.
+probe "model-creds" "vertex=${CLAUDE_CODE_USE_VERTEX:-0} base=${ANTHROPIC_VERTEX_BASE_URL:-none} oauth=${CLAUDE_CODE_OAUTH_TOKEN:+SET}${CLAUDE_CODE_OAUTH_TOKEN:-absent} apikey=${ANTHROPIC_API_KEY:+SET}${ANTHROPIC_API_KEY:-absent}"
+if [ -n "${https_proxy:-}" ]; then
+  PROBE_PROXY="git=$(git ls-remote https://github.com/git/git HEAD >/dev/null 2>&1 && echo ok || echo FAILED)"
+  PROBE_PROXY="$PROBE_PROXY gh=$(gh api rate_limit >/dev/null 2>&1 && echo ok || echo FAILED)"
+  probe "https_proxy" "${https_proxy} :: $PROBE_PROXY"
+  # Issue #34, and the cheapest possible proof of the swap: GitHub's rate limit is
+  # 60/h anonymous and 5000/h authenticated. The sandbox holds only the sentinel,
+  # so a 5000 here means the proxy substituted a real token mid-flight — and it
+  # means git and gh both trusted a certificate GitHub never signed.
+  probe "gh-token" "sentinel=${GH_TOKEN:-unset} rate_limit=$(gh api rate_limit --jq .rate.limit 2>&1 | tr -d '\n' | cut -c1-80)"
+  # The other credential shape, and the one #33's proxy never saw: git puts the
+  # token in the clone URL's *userinfo*, which reaches the proxy as HTTP basic,
+  # not as a Bearer header. `service=git-receive-pack` is the push handshake —
+  # it demands a push-capable credential even on a public repo, and mutates
+  # nothing, so the whole clone-and-push auth path is provable for free.
+  probe "git-basic" "receive-pack=$(curl -fsS -o /dev/null -w '%{http_code}' \
+    -u "x-access-token:${GH_TOKEN}" \
+    "https://github.com/${REPO}.git/info/refs?service=git-receive-pack" 2>&1 \
+    | tr -d '\n' | cut -c1-60)"
+  # ...and the same thing through git itself rather than curl, because whether
+  # git *sends* basic is git's business, and push is the whole prize in #34.
+  # --dry-run runs the real receive-pack handshake and mutates nothing.
+  if git clone -q --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+       /tmp/mitm-probe 2>/tmp/clone.err; then
+    PROBE_GIT="clone=ok push-dry-run=$(git -C /tmp/mitm-probe push --dry-run -q \
+      origin HEAD:refs/heads/implementer-mitm-probe >/dev/null 2>/tmp/push.err \
+      && echo ok || echo "FAILED: $(tr -d '\n' < /tmp/push.err | cut -c1-70)")"
+  else
+    PROBE_GIT="clone=FAILED: $(tr -d '\n' < /tmp/clone.err | cut -c1-90)"
+  fi
+  probe "git-sentinel" "$PROBE_GIT"
+  rm -rf /tmp/mitm-probe
+fi
+
+# SMOKE=1: one agent turn and nothing else. Issue #33 needs to know that Claude
+# Code itself reaches the model through the proxy while holding no credential of
+# its own — that is a startup-and-one-request question, not an implement-an-issue
+# question, and this way it costs a fraction of a cent instead of a dollar.
+# --debug so the resolved provider, base URL and model land in the log.
+if [ -n "${SMOKE:-}" ]; then
+  say "agent smoke: one turn through ${ANTHROPIC_VERTEX_BASE_URL:-the default endpoint}"
+  SMOKE_START=$(date +%s)
+  set +e
+  claude -p 'Reply with exactly: SMOKE-OK' --debug \
+    --dangerously-skip-permissions --output-format json \
+    --max-budget-usd "${MAX_BUDGET_USD:-10}" --max-turns 1 > /tmp/smoke.json 2>/tmp/smoke.err
+  SMOKE_RC=$?
+  set -e
+  probe "smoke-rc" "$SMOKE_RC elapsed=$(( $(date +%s) - SMOKE_START ))s"
+  probe "smoke-result" "$(jq -c '{is_error, total_cost_usd, num_turns, result}' /tmp/smoke.json 2>/dev/null | cut -c1-300 || cut -c1-300 /tmp/smoke.json)"
+  # The provider/model the CLI actually resolved, which is the interesting half.
+  grep -iE 'vertex|aiplatform|model|provider' /tmp/smoke.err | tail -25 >&2 || true
+fi
 
 # Probe-only mode: everything above costs nothing, so it is worth running on its
 # own against different security contexts before spending a real agent run.
@@ -126,6 +207,7 @@ set +e
     --dangerously-skip-permissions \
     --output-format stream-json --verbose \
     --json-schema "$(cat /opt/result.schema.json)" \
+    --max-budget-usd "${MAX_BUDGET_USD:-10}" \
     --max-turns 200
   echo $? > /tmp/agent.rc
 } | tee "${WORKSPACE}/stream.jsonl"

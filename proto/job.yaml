@@ -56,10 +56,17 @@ spec:
           envFrom:
             - secretRef:
                 name: proto-creds
+            # Run knobs; also the Vertex + proxy config when VERTEX=1. See go.sh.
+            - configMapRef:
+                name: proto-env
           volumeMounts:
             - { name: home, mountPath: /home/agent }
             - { name: tmp, mountPath: /tmp }
             - { name: workspace, mountPath: /workspace }
+            # Issue #34: the CA that signed the proxy's github.com cert. Only the
+            # certificate — the key stays in the proxy's Secret. Optional so the
+            # non-proxy runs still schedule.
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
           resources:
             requests: { cpu: "500m", memory: 1Gi }
             limits: { memory: 6Gi }
@@ -67,3 +74,5 @@ spec:
         - { name: home, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
         - { name: workspace, emptyDir: {} }
+        - name: proxy-ca
+          configMap: { name: proto-ca, optional: true }
