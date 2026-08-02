@@ -963,7 +963,266 @@ Versions: Claude Code `2.1.220`, `golang.org/x/oauth2 v0.36.0`, Go 1.25,
 `gcr.io/distroless/static-debian12:nonroot`, runsc `release-20260727.0`,
 k3s `v1.36.2+k3s1`.
 
+---
+
+## phase.sh — do the two review phases run unattended? (issue [#31][31])
+
+[#12][12] fixed the run plan at **three** agent phases — `implement`, then
+`code-review + fix`, then `ponytail-review + fix` — but every green run above
+exercised only `implement`. So two thirds of the decided run plan was unmeasured.
+This grows `proto/phase.sh` to three `claude -p` invocations and measures the
+whole thing.
+
+**No Kubernetes and no proxy.** [#22][22] settled the posture, [#33][33] and
+[#34][34] settled the credential path; neither bears on whether a review phase
+hangs. `proto/local.sh` runs the identical `phase.sh` and image under
+`docker run` — 30 lines, and it is what produced every number below. `go.sh`
+still exists for posture questions and gains only a `TOOLCHAIN` env var.
+
+Target: **[tmp-test-repo#2][t2]**, filed deliberately loose — *"cover count, sum,
+min, max, mean and median. Make it easy to extend with more statistics later."*
+No acceptance criteria, no out-of-scope section. [#1][t1]'s brief is airtight and
+produces a diff clean enough that both review phases would change nothing, which
+measures nothing.
+
+### ✅ Three phases, one run, green — and cheaper than projected
+
+| phase | rc | status | elapsed | cost | commits | dirty after | subagents |
+|---|---|---|---|---|---|---|---|
+| `implement` | 0 | `completed` | 215s | $0.897 | +1 | 0 | 2 |
+| `review` | 0 | `completed` | 169s | $0.811 | +1 | 0 | **3** |
+| `ponytail` | 0 | `completed` | 52s | $0.322 | +1 | 0 | 0 |
+| **run** | | `completed` | **439s** | **$2.03** | **3** | 0 | |
+
+Pushed `implementer/issue-2-3phase`, three commits, and **CI went green**.
+
+[#12][12] projected **~600s and ~$2.70** from the single-phase measurements. Actual
+is **439s / $2.03** — the projection was pessimistic by ~27%, because it assumed
+three phases of implement-phase size and the two review phases are cheaper than
+the implement phase (the third is a third of it). Against these numbers
+`activeDeadlineSeconds: 3600` is ~8x headroom on the run and
+`--max-budget-usd: 10` is ~11x the largest single phase. Both stand; neither was
+approached.
+
+### ⚠️ The fixed-point trap is real, and it is a *silently successful* dead run
+
+[#12][12] flagged `/code-review` step 1 — *"If they didn't specify [a fixed point],
+ask for it"* — as an unattended-hang trap. Confirmed, and the failure shape is
+worse than a hang. Bare `/mattpocock-skills:code-review` with no SHA:
+
+```
+rc=0   is_error=false   turns=2   cost=$0.11
+result: "`main` looks like the natural fixed point — the current branch
+         (implementer/issue-2-3phase) diverges from main at 1502c1d. Should I
+         use `main` as the fixed point for the diff, or did you have something
+         else in mind (e.g. a specific SHA)?"
+```
+
+One `Bash` call, then a question. **Every mechanical signal says success** —
+exit 0, `is_error: false`, a `result` message present — and the review did not
+run. This is [#6][6]'s "process success ≠ task success" one layer deeper: not a
+model giving up politely, but a *skill step* executing correctly against an
+absent human. Injecting `BASE_SHA` (which `phase.sh` already captures at clone
+time) is load-bearing, not belt-and-braces.
+
+### ✅ Spec resolution degrades gracefully — via the *branch name*, not the commits
+
+[#12][12] left this one open: step 2 walks commit messages for `#N` then fetches
+through `docs/agents/issue-tracker.md`, which target repos are explicitly not
+required to carry. Does it fall through to asking, or to "no spec available"?
+
+**Neither — it resolves the spec anyway.** With the SHA supplied but no spec
+pointer in the prompt, the skill's own steps were, in order:
+
+```
+cat docs/agents/issue-tracker.md          -> MISSING
+git log <sha>..HEAD --format='%H%n%B'     -> no #N in any commit message
+find docs specs .scratch -type f          -> nothing
+git branch --show-current                 -> implementer/issue-2-3phase
+gh issue view 2 --repo nissessenap/tmp-test-repo --json title,body,comments
+```
+
+It inferred the issue number **from the branch name**, then fetched it with the
+pod's `issues: read` token. The Spec axis then produced real findings quoting the
+issue's own wording.
+
+⚠️ **That makes [#13][13]'s branch format `implementer/issue-<n>` load-bearing for
+something it was not chosen for.** It was picked as a push-prefix for the branch
+ruleset; it is now also how the review phase finds its spec when nothing else
+carries the number. Worth writing down before someone "tidies" the format.
+
+The mitigation stays anyway — `phase.sh` names the issue and the exact
+`gh issue view` command — because relying on inference costs turns (8 turns and
+$0.46 for the bare-SHA run, versus a phase that is told) and because a repo whose
+branch is not ours would fall through to asking.
+
+### ✅ Both plugins resolve from repeated `--plugin-dir`, in either order
+
+22 `mattpocock-skills:*` commands **and** 6 `ponytail:*` commands in one session,
+including both `mattpocock-skills:code-review` and `ponytail:ponytail-review`.
+Order-independent — `A B` and `B A` give the same set. [#12][12]'s first spill is
+discharged: the ADR 0001 amendment for a second baked plugin is a second
+`git clone` and a second flag.
+
+⚠️ **`plugin_errors` does not exist** on 2.1.220's init message. [#12][12] said to
+check it is `null`; the key is simply absent, so a probe that asserts
+`plugin_errors == null` passes vacuously whether the plugin loaded or not. The
+real evidence is the `plugins` array — `[{name: mattpocock-skills, version:
+1.2.0}, {name: ponytail, version: 4.8.4}]` — and the `slash_commands` list.
+
+⚠️ **Count, don't eyeball.** The first version of this probe printed the command
+list through `cut -c1-500` and reported *zero* ponytail commands, because they
+sort last and the truncation ate them. An hour of chasing a bug in the wrong layer.
+
+### ⚠️ ponytail's hooks need `node`, which ADR 0001 forbids — and it is fine
+
+ponytail's `plugin.json` declares three hooks (`SessionStart`, `SubagentStart`,
+`UserPromptSubmit`), all `node "${CLAUDE_PLUGIN_ROOT}/hooks/*.js"`. [ADR 0001][adr1]
+bakes **no node/npm**. So on every one of the three phases:
+
+```json
+{"type":"system","subtype":"hook_response","hook_name":"SessionStart:startup",
+ "stderr":"/bin/sh: 1: node: not found\n","exit_code":127,"outcome":"error"}
+```
+
+Three failed hooks per run, surfaced in the stream and **not** fatal — the session
+initialises and the skills work. And the failure is in the *right direction*:
+those hooks are what make ponytail an ambient always-on instruction, which would
+otherwise have silently applied lazy-mode to the **implement** phase too. Explicit
+`/ponytail:ponytail-review` in phase 3 is the only place we want it. The no-node
+rule buys the correct behaviour by accident, and `outcome: error` in the stream is
+the only cost. **No change to ADR 0001** — but the amendment should say the
+plugin is baked for its *skills*, not its hooks.
+
+### ✅ Three nested subagents work, one of them added by the prompt
+
+[#6][6] verified parallel subagents in `-p`; [#12][12] asked for three at once with
+the third injected by the prompt rather than the skill. Phase 2's tool histogram
+is `Agent=3`, and the three descriptions are **`Standards axis review`**,
+**`Spec axis review`**, **`Go specialist review`** — two from the skill, one from
+`TOOLCHAIN=go` interpolated into the prompt. The implement phase separately shows
+`Agent=2`, which is `/implement`'s own trailing `/code-review` — the review that
+ran in every green run above and that nothing consumed.
+
+### ⚠️ Neither review skill commits, or even fixes — the prompt has to say so
+
+Both are **reporting** skills. `/code-review` ends at "Present the two reports";
+`ponytail-review/SKILL.md` ends *"Does not apply the fixes, only lists them."* A
+phase that merely invokes them costs a dollar and changes nothing.
+
+So roughly half of each review phase's prompt is the fix half — act on real
+findings, **remove** rather than expand what the review calls scope creep, run the
+repo's tests, commit to the current branch, do not amend, do not push. With that:
+**every phase committed, and `dirty` was 0 after all three.** `phase.sh` carries a
+deterministic `git add -A && git commit` fallback for a phase that leaves work
+behind; it never fired. **No explicit commit step is needed after each review
+phase** — asking is enough — but the fallback stays, because a dirty tree at push
+time is work silently dropped and the check is one line.
+
+### ⚠️ #12's "phase 2 widens, phase 3 narrows" is not what happened
+
+The pairing was [#12][12]'s answer to its own worry that a review-that-improves
+increases scope creep. On n=1, **both review phases narrowed**:
+
+| commit | phase | net |
+|---|---|---|
+| `5ce3e73` feat: add Summary/Summarize | implement | **+186** |
+| `348f163` refactor: use stdlib slices | review | +4 / **-10** |
+| `d006486` chore: trim speculative comment | ponytail | +1 / **-3** |
+
+Phase 2 reported **7 findings and actioned 1** — the one the Go specialist raised,
+hand-rolled logic that `slices.Min`/`Clone`/`Sort` cover. It explicitly declined
+the widening ones (`Min`/`Max` duplication, exported `Min`, discarded `ok`). It
+declined them because **the prompt's rule 2 told it to**, not because phase 3
+existed. So the diff-protection came from the prompt, and phase 3 arrived at a diff
+already narrowed and found $0.32 worth of -2 lines.
+
+That is not an argument for deleting phase 3 on one data point, but it relocates
+the justification: **rule 2 in the phase-2 prompt is what stops review-driven scope
+creep**, and phase 3's value is unproven. Worth watching over several runs before
+the MVP doc claims the pair is what does the work.
+
+➖ And a live tension between the two: the counterfactual run's Spec axis flagged
+that phase 3 had **cut a doc comment signposting the issue's own "easy to extend"
+requirement**. Phase 3 narrows without a spec in hand, so it can delete something
+phase 2 would have defended. Nothing to fix now; a real cost of ordering them this
+way.
+
+### ⚠️ The agent downloads its own Go toolchain, and the next phase inherits it
+
+Not a question the ticket asked, and the most consequential thing the run found.
+The prototype image is ADR 0001's *base* — no language toolchain — and it was
+pointed at a Go repo, so `go build` failed. The implement phase's response:
+
+```
+apt-get install -y golang-go         -> refused (non-root, read-only rootfs)
+sudo -n apt-get install -y golang-go -> sudo: command not found
+curl -sL https://dl.google.com/go/go1.23.0.linux-amd64.tar.gz | tar -xz  -> OK
+export PATH=$HOME/toolchain/go/bin:$PATH && go build ./...               -> OK
+```
+
+Then `go 1.26.1` in `go.mod` triggered Go's own toolchain auto-download, so the
+`go version` that actually ran the tests was **1.26.1**, fetched through the module
+proxy. Three consequences:
+
+1. **This is [ADR 0001][adr1]'s "no pre-agent setup phase, the agent installs deps
+   itself" decision working — and its bill.** The agent's remedy for a missing
+   toolchain is to pull a binary off the internet. Under [#16][16]/[#37][37]'s egress
+   allowlist that either fails the run (no `dl.google.com`) or means the sandbox can
+   fetch arbitrary binaries. The allowlist inventory in [#33][33] is missing
+   `dl.google.com` and `*.golang.org` for the toolchain itself, not just modules.
+2. **Phases 2 and 3 inherited the toolchain through `$HOME`.** Phase 2 hunted for
+   it (`ls /home/agent/toolchain/go/bin`), found the implement phase's download,
+   exported PATH and verified for real. A fresh `claude -p` per phase is a fresh
+   *process*, not a fresh *container* — so the `emptyDir` `HOME` is an accidental
+   intra-run dependency cache. It works, and it means **the review phases' ability
+   to run tests depends on the implement phase's environment mutation**; if phase 1
+   dies before installing, phases 2 and 3 cannot verify.
+3. **ADR 0003's toolchain→image mapping was not exercised**, because `local.sh`
+   runs the base image regardless of repo. That is the prototype's shortcut, and it
+   is what made the finding visible.
+
+All three phases' summaries claimed build/test/gofmt passed, and **all three claims
+were true** — checked against the actual `tool_result` output, not the summaries.
+Worth stating because the opposite is the obvious suspicion, and one grep settled it.
+
+### ➖ One credential leak fixed on the way past
+
+`probe "model-creds"` printed `oauth=${X:+SET}${X:-absent}`, expecting one branch or
+the other. `${X:-absent}` expands to **`$X`** when `X` is set, so the two forms do
+not compose and the probe printed `SET` followed by the whole OAuth token into the
+pod log. Present since [#33][33]; visible in this run's k3s attempt. Replaced with a
+two-branch test.
+
+### ➖ What this does not answer
+
+- **n=1, one tiny Go repo, one loose brief.** Every number above is a single
+  observation. The relative phase costs (implement ≈ review ≈ 3× ponytail) are the
+  part most likely to move on a real repo.
+- **Whether phase 3 earns $0.32.** See above — its findings arrived at an
+  already-narrowed diff, and the honest reading is that phase 2's rule 2 did the
+  work. Needs several runs.
+- **A dead review phase.** `status: completed_unreviewed` and the per-phase
+  accounting are wired and were exercised only by the accidental
+  `Not logged in` run (all three phases `status=error`, run reported no commits and
+  exited 1, per-phase records intact). A 529 mid-review has not been provoked.
+- **The language reviewer beyond `go`.** `TOOLCHAIN` is one string interpolated
+  into one paragraph; `node` and `python` are untested and unset is the documented
+  fallback.
+- **Anything about posture.** No gVisor, no `readOnlyRootFilesystem`, no proxy in
+  these numbers. `go.sh` is still the instrument for that, and the k3s attempt died
+  on an expired GCP ADC (`invalid_grant`, `invalid_rapt`) rather than on anything
+  about the phases.
+
+Versions: Claude Code `2.1.220`, `mattpocock/skills@2ab9580` (plugin 1.2.0),
+`DietrichGebert/ponytail@16f2980` (plugin 4.8.4), model `claude-opus-5[1m]`,
+`debian:trixie-slim`.
+
 [t1]: https://github.com/nissessenap/tmp-test-repo/issues/1
+[t2]: https://github.com/nissessenap/tmp-test-repo/issues/2
+[16]: https://github.com/nissessenap/the-implementer/issues/16
+[31]: https://github.com/nissessenap/the-implementer/issues/31
+[37]: https://github.com/nissessenap/the-implementer/issues/37
 [12]: https://github.com/nissessenap/the-implementer/issues/12
 [13]: https://github.com/nissessenap/the-implementer/issues/13
 [14]: https://github.com/nissessenap/the-implementer/issues/14
