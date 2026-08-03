@@ -248,6 +248,18 @@ run_phase() {
   _stream="${WORKSPACE}/${PHASE}.jsonl"
   _base=$(git rev-parse HEAD)
 
+  # Only the phase that asks for ponytail gets the ponytail plugin. None of its
+  # six skills carries `disable-model-invocation`, and the `ponytail` skill's own
+  # description is "Use on ANY coding task: writing, adding, refactoring, fixing,
+  # reviewing, or designing code" — maximally auto-invocable. Baked on every phase
+  # it could silently apply lazy-mode to `implement`, which nobody asked for. A
+  # plugin dir the phase never sees cannot self-trigger, so this is cheaper than
+  # measuring whether it does.
+  case $PHASE in
+    ponytail) _plugins="--plugin-dir /opt/skills --plugin-dir /opt/ponytail" ;;
+    *)        _plugins="--plugin-dir /opt/skills" ;;
+  esac
+
   say "phase ${PHASE}: claude -p"
   _started=$(date +%s)
   set +e
@@ -255,7 +267,7 @@ run_phase() {
   # And $? after a pipe is tee's, not the agent's — so the rc goes via a file.
   {
     claude -p "$_prompt" \
-      --plugin-dir /opt/skills --plugin-dir /opt/ponytail \
+      $_plugins \
       --dangerously-skip-permissions \
       --output-format stream-json --verbose \
       --json-schema "$_schema" \

@@ -1086,13 +1086,24 @@ bakes **no node/npm**. So on every one of the three phases:
 ```
 
 Three failed hooks per run, surfaced in the stream and **not** fatal — the session
-initialises and the skills work. And the failure is in the *right direction*:
-those hooks are what make ponytail an ambient always-on instruction, which would
-otherwise have silently applied lazy-mode to the **implement** phase too. Explicit
-`/ponytail:ponytail-review` in phase 3 is the only place we want it. The no-node
-rule buys the correct behaviour by accident, and `outcome: error` in the stream is
-the only cost. **No change to ADR 0001** — but the amendment should say the
-plugin is baked for its *skills*, not its hooks.
+initialises and the skills work. `outcome: error` in the stream is the only cost.
+**No change to ADR 0001** — but the amendment should say the plugin is baked for
+its *skills*, not its hooks.
+
+⚠️ **The failing hooks are not, however, what keeps lazy-mode out of the implement
+phase.** Those hooks are the mechanism that makes ponytail an *ambient* always-on
+instruction, so it is tempting to read `exit_code: 127` as free protection. It is
+not: **none of ponytail's six skills carries `disable-model-invocation`**, and the
+`ponytail` skill's own description reads *"Use on ANY coding task: writing, adding,
+refactoring, fixing, reviewing, or designing code."* That is maximally
+auto-invocable, and with the plugin baked it is reachable from every phase. The
+implement phase's histogram shows `Skill=1` which cannot now be attributed.
+
+So `run_phase` passes `--plugin-dir /opt/ponytail` **only to the ponytail phase**.
+A plugin dir a phase never sees cannot self-trigger, which is cheaper and more
+certain than measuring whether it does. Both flags still go on phase 3, so the
+repeatability finding above stands unchanged — and this is the *run plan's* choice,
+not the image's: ADR 0001 still bakes both.
 
 ### ✅ Three nested subagents work, one of them added by the prompt
 
