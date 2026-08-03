@@ -32,8 +32,20 @@ RUN git clone -q https://github.com/mattpocock/skills /opt/skills \
  && git -C /opt/skills checkout -q "${SKILLS_SHA}" \
  && rm -rf /opt/skills/.git
 
+# Issue #12's first spill: a *second* pinned plugin, for phase 3's
+# /ponytail:ponytail-review. --plugin-dir is documented repeatable; whether both
+# resolve in one session is one of issue #31's questions, so it is a flag not a merge.
+# ponytail's own plugin.json declares node hooks (SessionStart / SubagentStart /
+# UserPromptSubmit). ADR 0001 forbids node, so those hooks cannot run here — what
+# that costs is measured rather than assumed. See #31.
+ARG PONYTAIL_SHA=16f29800fd2681bdf24f3eb4ccffe38be3baec6b
+RUN git clone -q https://github.com/DietrichGebert/ponytail /opt/ponytail \
+ && git -C /opt/ponytail checkout -q "${PONYTAIL_SHA}" \
+ && rm -rf /opt/ponytail/.git
+
 COPY phase.sh /usr/local/bin/phase.sh
 COPY result.schema.json /opt/result.schema.json
+COPY review.schema.json /opt/review.schema.json
 RUN chmod 0755 /usr/local/bin/phase.sh
 
 USER 1000

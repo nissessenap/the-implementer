@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "blocked", "failed"],
+      "description": "completed = the review ran and any findings you acted on are committed. blocked = you could not run the review. failed = you ran it and the result is not usable."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One or two sentences: what the review found and what you changed in response."
+    },
+    "findings": {
+      "type": "integer",
+      "description": "How many findings the review reported."
+    },
+    "fixed": {
+      "type": "integer",
+      "description": "How many of those findings you acted on."
+    }
+  },
+  "required": ["status", "summary", "findings", "fixed"],
+  "additionalProperties": false
+}
