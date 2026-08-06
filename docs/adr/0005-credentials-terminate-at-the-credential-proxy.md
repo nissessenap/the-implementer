@@ -113,6 +113,13 @@ Both credential *shapes* are handled: `Basic base64(x-access-token:SENTINEL)`
 Non-sentinel credentials pass through untouched **and logged** — swallowing a
 smuggled one would only hide it.
 
+**Both shapes must be a regression test, not a paragraph.** [The
+credential-broker survey][cbsurvey] §3.2 found that two of the four shipping
+credential-substituting proxies — **OpenAI's `codex` and Anthropic's
+`sandbox-runtime`** — silently no-op on git's basic-auth shape: no error, no log,
+just an unauthenticated push. It is the one detail in this component the field
+demonstrably gets wrong, and it fails silently, so it earns an assertion.
+
 ### The proxy mints, and Cloud KMS signs the App JWT
 
 The proxy never receives a token from the orchestrator. There is no per-run
@@ -138,6 +145,24 @@ every installation", and with KMS there is no holder.
 > already puts run identity in annotations, so source pod IP → Pod → annotation
 > is nearly free. Get this wrong and a compromised sandbox pushes to every
 > repository the App is installed on.
+>
+> **Amended by [the credential-broker survey][cbsurvey] §4.4: the pod-IP lookup
+> is not sufficient as the *sole* identity.** Pod IPs are ephemeral and reused, so
+> a recycled IP can map to the wrong run — `kube2iam` has this same hole and does
+> not solve it. And as written the proxy authenticates no caller at all
+> ([#37][callercomment]). Both close with one mechanism: a **per-run secret in
+> `Proxy-Authorization`**, injected into the Job by the orchestrator (which
+> already knows the run), with the pod-IP annotation lookup as a **second factor
+> that must agree**. `NetworkPolicy` then becomes defence in depth rather than the
+> only control. Mechanism notes: resolve the IP off an informer index, not a
+> `status.podIP` fieldSelector (only `spec.nodeName` is indexed, so a
+> fieldSelector is a full apiserver list-and-filter); and rate-limit proxy-auth
+> failures before the `CONNECT` hijack.
+>
+> ⚠️ **Landmine:** `git` 407s against a proxy requiring authentication unless
+> `GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic'` is set in the sandbox —
+> which is exactly what `anthropic-experimental/sandbox-runtime` does. Nothing
+> else breaks, so this fails in one place only, loudly.
 
 Practical notes for implementation:
 
@@ -146,19 +171,45 @@ Practical notes for implementation:
   So: GitHub generates → wrapped [import job][kmsimport] → destroy every local
   copy. The honest claim is *"the key stops existing anywhere we control and can
   never be read back"*, not *"never existed as bytes"*.
-- KMS wants imported asymmetric keys as **PKCS#8 DER**; GitHub emits **PKCS#1
+- ~~KMS wants imported asymmetric keys as **PKCS#8 DER**; GitHub emits **PKCS#1
   PEM**. One `openssl pkcs8 -topk8`, but it eats an afternoon if discovered
-  mid-import.
-- Send the **digest**, not the message. In Go, a custom `golang-jwt`
+  mid-import.~~
+- ~~Send the **digest**, not the message. In Go, a custom `golang-jwt`
   `SigningMethod` is the hook: JWT assembly stays normal, only `Sign()` becomes
-  an API call.
+  an API call.~~
+- **Both amended by [the credential-broker survey][cbsurvey] §4.1: don't write
+  either. See the signing seam below.**
 - GitHub caps the JWT `exp` at 10 minutes, so signing is per-mint. The
   installation token is cached for the run — a handful of KMS calls per run, not
   per request.
 
 **Seam, not work:** KMS ties this to GCP. Signing stays behind one interface so
 a plain-key signer for a non-GCP operator is a later addition rather than a
-rewrite. The second implementation is deliberately **not** built now.
+rewrite. ~~The second implementation is deliberately **not** built now.~~
+
+> **Amended by [the credential-broker survey][cbsurvey] §4.1.** The interface is
+> `bradleyfalzon/ghinstallation`'s `Signer`, which we depend on regardless, and
+> [`isometry/ghait`][ghait] (Apache-2.0) already implements it for GCP KMS, AWS
+> KMS, Azure Key Vault, Vault transit and local PEM behind build tags. Its
+> GCP `Check()` verifies key state ENABLED **and** algorithm
+> `RSA_SIGN_PKCS1_2048_SHA256` at startup — the pin above, validated on boot
+> rather than discovered on first mint. **So the non-GCP operator story arrives
+> for free and the second implementation is no longer deferred.**
+>
+> ⚠️ **Adopt with eyes open, and review the code before merging it.** `ghait` is
+> 1★ with one maintainer. That is acceptable only because of *why* it is
+> acceptable: the mechanism is ~40 lines of Go against `ghinstallation`'s
+> `Signer`, so if it is abandoned we own the replacement cheaply. Read the
+> signing path and the GCP provider in detail at implementation time; if the
+> review goes badly, vendor the 40 lines and drop the dependency. Either way the
+> PKCS#8, digest-signing and custom-`SigningMethod` work above is deleted from
+> [#37][build].
+>
+> Runner-up, for the record: [`octo-sts`][octosts] (Chainguard, 385★) does the
+> same signing as a *service*, and puts the trust policy in the target
+> repository — attractive, but it authenticates callers by OIDC (k3s publishes no
+> issuer) and requires scaffolding in target repos, which [the architecture
+> document][arch] §3 specifically prizes not needing.
 
 ### Registries: the same GCP token
 
@@ -189,6 +240,16 @@ rather than by remembering to check.
 
 The proxy reads its intercept list back off its own certificate's SANs, so the
 two cannot drift. Keep that property.
+
+**Stated as a requirement, so a future substrate evaluation fails fast on it:
+the certificate must stay narrower than the tunnel, and interception must be
+selectable per hostname.** [The credential-broker survey][cbsurvey] §2.2 found
+the one credible substrate (agentgateway) matches tunnel re-entry on the CONNECT
+authority's **port**, not its hostname, and Envoy cannot mint certificates at all
+(§3.5) — so both would force one certificate covering the whole allowlist, which
+turns the structural protection above back into a rule someone has to remember.
+Any candidate lacking per-hostname selective MITM is disqualified without further
+review.
 
 ### The trust seam: five variables, and four of them replace
 
@@ -305,7 +366,25 @@ allowlist. But proxy environment variables are **best-effort routing**. What
   different question.
 - **Trusting only the proxy's `ca.crt`.** Rejected by measurement; see the
   replace-vs-add trap above.
+- **Adopting an existing broker or MITM substrate instead of writing the proxy.**
+  Surveyed in full — agentgateway/CB4a, `openai/codex`, `sandbox-runtime`,
+  `Infisical/agent-vault`, `finos/git-proxy`, `secretless-broker`, Squid, Envoy,
+  `mitmproxy`, `goproxy` and ~15 others — in [the credential-broker
+  survey][cbsurvey]. **None is adoptable whole**, and the survey says why for each,
+  so this does not need re-opening. The parts worth taking are taken: `ghait` for
+  KMS signing (above), `gastown`'s `validateReceivePackRefs` algorithm plus
+  `go-git`'s pkt-line decoder for push-branch enforcement, and `gh-aw`'s
+  `ecosystem_domains.json` for the egress allowlist. `draft-hartman-credential-broker-4-agents`
+  is **vocabulary and a threat checklist only, never a dependency** — rev -00, zero
+  implementations, and it recommends handing the agent a real short-lived token,
+  which is precisely what this ADR refuses. **Revisit agentgateway only if
+  [#2416][ag2416] lands and a KMS signer appears.**
 
+[cbsurvey]: ../research/credential-brokers-and-whether-to-buy-the-proxy.md
+[ghait]: https://github.com/isometry/ghait
+[octosts]: https://github.com/octo-sts/app
+[ag2416]: https://github.com/agentgateway/agentgateway/issues/2416
+[callercomment]: https://github.com/nissessenap/the-implementer/issues/37#issuecomment-5203429677
 [adr1]: 0001-sandbox-image-strategy-and-byo-contract.md
 [adr4]: 0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md
 [arch]: ../architecture.md
