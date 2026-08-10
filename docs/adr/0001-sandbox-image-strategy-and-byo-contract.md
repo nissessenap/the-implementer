@@ -252,7 +252,7 @@ ticket rather than an unacknowledged hole.
   pointed at by environment variables; `update-ca-certificates` is never run.
   ~~`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`.~~ **Amended by
   [issue #34][ghterm]: it takes more variables than that, and pointing them at the
-  CA alone breaks the sandbox — see [the trust seam](#the-trust-seam-is-five-variables-and-most-of-them-replace-rather-than-add)
+  CA alone breaks the sandbox — see [the trust seam](#the-trust-seam-is-seven-variables-and-most-of-them-replace-rather-than-add)
   below.** mTLS to the proxy, when it arrives, is `CLAUDE_CODE_CLIENT_CERT` /
   `_KEY` — configuration, not a build change.
 - **Subprocess env scrubbing stays on** (its default), which is why `bubblewrap`
@@ -280,7 +280,7 @@ ticket rather than an unacknowledged hole.
 Dependency caches live on ephemeral volumes and die with the pod. Reusing them
 across runs is [issue #20][caches].
 
-### The trust seam is five variables, and most of them replace rather than add
+### The trust seam is seven variables, and most of them replace rather than add
 
 Added by [issue #34][ghterm], which put a real proxy CA in front of `git`, `gh`,
 `curl` and `pip` and measured what each one actually reads. This section is small
@@ -296,6 +296,8 @@ The tools share no convention:
 | `git` (libcurl) | `GIT_SSL_CAINFO` |
 | `curl` | `CURL_CA_BUNDLE` |
 | `pip` | `PIP_CERT` — carries its own bundle and ignores `SSL_CERT_FILE` entirely |
+| Python `requests` / `httpx` / `urllib3` / botocore | `REQUESTS_CA_BUNDLE` |
+| AWS CLI, botocore | `AWS_CA_BUNDLE` |
 | agent CLI (Node) | `NODE_EXTRA_CA_CERTS` |
 
 **Everything except `NODE_EXTRA_CA_CERTS` *replaces* the trust store rather than
@@ -303,7 +305,34 @@ adding to it.** Pointing them at the proxy's `ca.crt` alone leaves the sandbox
 unable to verify anything else on the internet — a failure that surfaces far from
 its cause, on the first unrelated HTTPS call. So the value is a **bundle**: the
 system `ca-certificates.crt` concatenated with the proxy's CA. Only
-`NODE_EXTRA_CA_CERTS` is genuinely additive and takes the bare `ca.crt`.
+`NODE_EXTRA_CA_CERTS` is genuinely additive, so it *may* take the bare `ca.crt` —
+but handing every variable the same bundle is one assignment instead of two special
+cases, and it is what `sandbox-runtime` does.
+
+> **Amended 2026-08-10 by [the credential-broker survey][cbsurvey] §4.6, corrected
+> against the source.** The survey said `anthropic-experimental/sandbox-runtime`
+> sets **13** such variables; it sets **11**, in `CA_TRUST_VARS` at
+> `src/sandbox/sandbox-utils.ts:442-459` (13 was a line count, and the path in the
+> survey is wrong). All five of ours are among them. The two added to the table
+> above are the ones that matter for the toolchains v1 ships: `REQUESTS_CA_BUNDLE`
+> is a real gap, because `PIP_CERT` covers `pip` and nothing covers a test suite or
+> an agent-written script that imports `requests`. Four more are deliberately **not**
+> adopted — `CARGO_HTTP_CAINFO`, `DENO_CERT`, `NIX_SSL_CERT_FILE` (no rust, deno or
+> nix toolchain in v1) and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE` (the sandbox carries
+> no `gcloud` by design; note for whoever adds one that gcloud ignores both
+> `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`). They are table entries, not work.
+>
+> The bundle-not-bare-CA rule above is **independently confirmed**: upstream assigns
+> all 11 the same value and it is always `mitmCA.trustBundlePath`, never `certPath`,
+> for exactly our reason — stated at `src/sandbox/mitm-ca.ts:41-51`, that these
+> variables replace rather than extend, so a bare CA breaks verification of every
+> host the proxy does not terminate.
+>
+> **Out of scope, stated so nobody re-derives it:** upstream also installs the CA
+> into the Windows `CurrentUser\Root` store (schannel/.NET clients read only the OS
+> store) and needs a macOS sandbox hole for `com.apple.trustd.agent` so Go binaries
+> can verify. Our sandbox is Linux in a container, so neither applies — and the
+> attribution of `gh` to `SSL_CERT_FILE` above holds on Linux but not on macOS.
 
 **The phase script assembles the bundle into `/tmp` at run-plan start.** Not the
 image, and not an initContainer:
@@ -454,6 +483,7 @@ claimed and which the base image does not currently provide — see [issue
 [k3sspike]: https://github.com/nissessenap/the-implementer/pull/27
 [ghterm]: https://github.com/nissessenap/the-implementer/issues/34
 [proxyproto]: https://github.com/nissessenap/the-implementer/pull/35
+[cbsurvey]: ../research/credential-brokers-and-whether-to-buy-the-proxy.md
 [adr3]: 0003-toolchain-detection-and-image-selection.md
 [bw745]: https://github.com/containers/bubblewrap/issues/745
 [gv13438]: https://github.com/google/gvisor/issues/13438

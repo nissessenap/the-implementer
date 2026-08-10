@@ -73,7 +73,7 @@ comment if they do not.
 | What | Where it lives |
 | --- | --- |
 | A run exists | The Job object |
-| Which issue a run is for | Job **annotations** (`owner`, `repo`, `issue`) |
+| Which issue a run is for | **Annotations** (`owner`, `repo`, `issue`) on the Job **and** on `spec.template` |
 | Run finished, and how | Pod phase + `state.terminated` |
 | The run's result | `/dev/termination-log` → terminated `message` |
 | The image actually used | `containerStatuses[].imageID` |
@@ -84,6 +84,23 @@ at 63 characters and repository names run past it — the same cliff the Job nam
 hits below. A 100-character value is rejected as a label and accepted as an
 annotation; measured with `kubectl create --dry-run=server`. One
 `app=implementer` label exists for listing.
+
+**Written twice, deliberately — and this was a real gap until 2026-08-10.**
+`spec.template.metadata.annotations` is what a Pod inherits; a Job's *own* metadata
+does **not** propagate to its pods. The earlier wording said only "Job annotations",
+which would have left the credential proxy unable to see run identity at all — it
+resolves a request's source pod IP to a **Pod** ([ADR 0005][adr5]), and mint-for-the-
+annotation's-repository is that ADR's one non-negotiable. Both copies have a reader,
+so neither is redundant: the Job's is what a human sees in `kubectl get job -o yaml`
+and what the relist-on-restart reconciliation below reads; the pod template's is what
+the proxy resolves and what the informer already reads off the Pod it watches. They
+are written from one struct in the Job builder, so drift is not a live risk.
+
+This is also the bound on the proxy's RBAC: `get`, `list`, `watch` on **pods**, in
+its own namespace, and nothing else — no Secrets, no Jobs, no cluster scope. Reading
+identity off the Job instead would have cost `jobs: get` plus an ownerReference hop.
+(For contrast, Kelos's chart ships a ClusterRole with cluster-wide
+`secrets: get,list,watch`.)
 
 ### Idempotency is the Job name
 
@@ -186,8 +203,43 @@ component entirely. **The orchestrator creates exactly one object per run.**
   `AlreadyExists` solves for free.
 - **Identity in labels.** Rejected by measurement: repository names exceed the
   63-character label-value cap.
+- **Not writing an orchestrator at all — adopting [Kelos][kelos].** Added
+  2026-08-10 from [its research][kelosresearch]. Kelos is the best prior art this
+  project has found and it independently reached **seven** of our decisions,
+  including the two most contested — a Job per run, and the Job name plus a
+  swallowed `AlreadyExists` as the whole of idempotency. That convergence is the
+  valuable part, and it is also the argument against adopting it: the plumbing we
+  would save is the part two independent designs agree on, i.e. the commodity part.
+  What it costs is everything the project exists for. Every credential lands in the
+  sandbox as an environment variable, including a full-installation `GITHUB_TOKEN`
+  and, worst case, an entire `~/.codex/auth.json` with its durable refresh token
+  ([ADR 0005][adr5] says none may). **gVisor is not expressible in its API at all** —
+  `PodOverrides` has fifteen fields and no `runtimeClassName`, confirmed against the
+  generated CRD — and `AgentUID = int64(61100)` is a Go constant in its orchestrator,
+  the exact trap [ADR 0001][adr1] wrote a clause against. Its webhook authorization
+  is exact-string matching on `sender.login`, with no `sender.type` check anywhere in
+  the repository. And plugin delivery breaks silently: `spec.skills[]` collapses
+  everything into one reserved directory, so `/mattpocock-skills:implement` and
+  `/ponytail:ponytail-review` both become `skills-sh:<name>` and our invocation
+  strings stop resolving.
+
+  A middle option was costed and also declined — ship a Kelos-conformant sandbox
+  image plus our credential proxy, keeping the differentiator and renting the
+  plumbing. Its image contract is genuinely open (no `FROM kelos-base`), so the shim
+  is cheap; the blockers above are not, and one cost the research did not price is
+  decisive: **an in-pod PR builder cannot report its own pod's death.** Today the
+  informer writes a PR or an issue comment for `OOMKilled`, `activeDeadlineSeconds`
+  and a dead review phase alike. Moving that inside the sandbox moves the failure
+  path into the thing that fails.
+
+  Nothing is owed to keep this reversible. The phase script already takes its inputs
+  from argv and env and returns results through a marker channel, and it is the pod's
+  `command` ([ADR 0001][adr1]) — so whatever invokes it is *already* swappable, and
+  the residual blockers are on Kelos's side of the line, not ours.
 
 [map]: https://github.com/nissessenap/the-implementer/issues/1
+[kelos]: https://github.com/kelos-dev/kelos
+[kelosresearch]: ../research/kelos-and-kubefoundry.md
 [adr1]: 0001-sandbox-image-strategy-and-byo-contract.md
 [adr2]: 0002-a-run-executes-as-a-kubernetes-job.md
 [adr3]: 0003-toolchain-detection-and-image-selection.md
