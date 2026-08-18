@@ -1,3 +1,6 @@
 # Sourcing proto/kubeconf.sh from a non-bash shell leaves this at the repo root
 # ($BASH_SOURCE is unset, so dirname resolves to "."). Never commit a kubeconfig.
 .k3s.kubeconfig
+
+# `make kind-up` writes its own kubeconfig rather than touching ~/.kube/config.
+.kind.kubeconfig

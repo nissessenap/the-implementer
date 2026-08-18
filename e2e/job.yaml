@@ -1,0 +1,109 @@
+# The e2e trust-bundle fixture, and the reference PodSpec for the sandbox.
+#
+# Applied by e2e/20-trust-bundle.sh, which substitutes the __PLACEHOLDERS__. Hand-
+# appliable too: the whole assertion is this file's own `args`, so there is no
+# ConfigMap and no image of ours to build. It exists before the proxy does on
+# purpose — the trust seam is the fiddliest plumbing in #37 and the easiest to
+# misdiagnose once there is a proxy to blame.
+#
+# The posture is ADR 0001's: uid 1000, RuntimeDefault, read-only rootfs, no
+# capabilities. `runtimeClassName` is templated because hosted runners do not
+# reliably expose /dev/kvm, so gVisor in CI would need runsc's slower ptrace
+# platform. The proxy itself has no gVisor requirement.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-trust-bundle
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      __RUNTIME_CLASS__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: probe
+          image: curlimages/curl:8.16.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            # ADR 0005's trust seam, all seven of it. Six of these *replace* the
+            # trust store rather than adding to it, which is why every one points
+            # at the assembled bundle and never at the bare ca.crt.
+            - { name: SSL_CERT_FILE, value: /tmp/trust-bundle.crt }
+            - { name: GIT_SSL_CAINFO, value: /tmp/trust-bundle.crt }
+            - { name: CURL_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            - { name: PIP_CERT, value: /tmp/trust-bundle.crt }
+            - { name: REQUESTS_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            - { name: AWS_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            - { name: NODE_EXTRA_CA_CERTS, value: /tmp/trust-bundle.crt }
+            # The intercepted host, as the leaf's SAN list names it, resolved to
+            # the fixture server the way the proxy will resolve it for real.
+            - { name: TLS_HOST, value: github.com }
+            - { name: TLS_IP, value: "__TLS_IP__" }
+            # A publicly-signed host that is deliberately *not* on the leaf, so
+            # it can only be verified by the system roots half of the bundle.
+            - { name: PUBLIC_URL, value: https://proxy.golang.org/ }
+            - { name: HOME, value: /tmp }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            # Only the certificate. The key stays in the leaf's Secret, which the
+            # sandbox must never be able to read.
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              CA=/run/proxy-ca/ca.crt
+              SYSTEM=/etc/ssl/certs/ca-certificates.crt
+              BUNDLE=/tmp/trust-bundle.crt
+
+              # Assembled at start rather than baked, because readOnlyRootFilesystem
+              # makes /etc/ssl/certs unwritable. This is the one line of the run plan
+              # the trust seam costs.
+              cat "$SYSTEM" "$CA" > "$BUNDLE"
+              n() { grep -c 'BEGIN CERTIFICATE' "$1"; }
+              echo "PROBE bundle          $(n "$BUNDLE") certs = system $(n "$SYSTEM") + ours $(n "$CA")"
+
+              # --retry-connrefused rather than a readiness probe on the server: Ready
+              # means the container started, not that python is listening yet.
+              leaf() { curl -fsS -o /dev/null --max-time 20 --retry 5 --retry-connrefused \
+                         --resolve "$TLS_HOST:443:$TLS_IP" "https://$TLS_HOST/"; }
+              public() { curl -fsS -o /dev/null --max-time 20 "$PUBLIC_URL"; }
+
+              # ponytail: curl's variable is the only one of the seven actually
+              # exercised — the other six are carried because this file is the
+              # reference PodSpec. Per-tool coverage arrives with the toolchain
+              # images, which are the only things that will have pip and node in them.
+
+              # `cmd || { …; exit 1; }` rather than `cmd && echo ok`: set -e is
+              # specified *not* to fire for a failure on the left of an AND-OR list,
+              # so the tidier spelling reports the failure and exits 0 anyway.
+              leaf   || { echo "!!! FAIL: the bundle did not verify the leaf"; exit 1; }
+              echo "PROBE leaf-bundle     ok  (our CA is trusted)"
+              public || { echo "!!! FAIL: the bundle lost the system roots"; exit 1; }
+              echo "PROBE public-bundle   ok  (the system roots survived)"
+
+              # The negative, as a differential rather than a lone failure: the bare
+              # ca.crt still verifies our leaf perfectly and nothing else on the
+              # internet. Point the six replacing variables at it and a run dies on
+              # its first unrelated HTTPS call, far from the cause.
+              export CURL_CA_BUNDLE=$CA
+              leaf || { echo "!!! FAIL: the bare ca.crt did not verify our own leaf"; exit 1; }
+              echo "PROBE leaf-bare-ca    ok  (the CA did sign it, after all)"
+              if public 2>/dev/null; then # its stderr is expected, and reads like a bug
+                echo "!!! FAIL: the bare ca.crt verified $PUBLIC_URL — this assertion is broken"
+                exit 1
+              fi
+              echo "PROBE public-bare-ca  refused, as it must be"
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - name: proxy-ca
+          configMap: { name: proxy-ca }

@@ -38,7 +38,21 @@ Nothing architectural is still open. Egress allowlisting and `NetworkPolicy` enf
 
 Your organization probably has multiple languages, and what's pre-installed in a sandbox is up to you. The strategy is settled in [ADR 0001](docs/adr/0001-sandbox-image-strategy-and-byo-contract.md): one small base image, with per-language images as short derivatives, rather than the field's usual multi-language base plus a setup script. The BYO-image contract is the base Dockerfile itself, and it is deliberately small.
 
-Two hard constraints are already known. **The sandbox must run as a non-root user** — bubblewrap fails outright as uid 0 under gVisor. And it must **trust a private CA**, because the proxy terminates TLS for GitHub and the package registries; that turns out to need five environment variables rather than one, since all but one of them *replace* the system trust store rather than adding to it.
+Two hard constraints are already known. **The sandbox must run as a non-root user** — bubblewrap fails outright as uid 0 under gVisor. And it must **trust a private CA**, because the proxy terminates TLS for GitHub and the package registries; that turns out to need seven environment variables rather than one, since six of them *replace* the system trust store rather than adding to it.
+
+## Running the e2e
+
+```sh
+make kind-up && make e2e            # a throwaway kind cluster
+export KUBECONFIG=…; make e2e       # or any cluster you already have
+RUNTIME_CLASS=gvisor make e2e       # gVisor, where a RuntimeClass exists
+```
+
+The harness is `KUBECONFIG`-driven and assumes nothing about the cluster's
+flavour. It is staged by the credentials each stage needs: the unauthenticated
+stages run on every pull request, forks included, and a stage that needs a GitHub
+App or GCP skips cleanly when its secrets are absent. Adding a stage is adding a
+file to [`e2e/`](e2e/).
 
 ## Roadmap
 

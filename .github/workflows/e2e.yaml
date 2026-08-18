@@ -1,0 +1,30 @@
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # No secrets are referenced, so this runs on fork pull requests. Stages needing a
+  # GitHub App or GCP call `requires` in e2e/lib.sh and skip cleanly.
+  unauthenticated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      # kind and kubectl are preinstalled on the hosted runner image, so the
+      # cluster costs zero install steps. runtimeClassName stays unset: hosted
+      # runners do not reliably expose /dev/kvm, and the proxy has no gVisor
+      # requirement.
+      - run: make kind-up
+      - run: make e2e
+      # The cluster dies with the runner, so anything not printed here is gone.
+      - if: failure()
+        run: |
+          kubectl get pod -A -o wide
+          kubectl -n cert-manager logs -l app.kubernetes.io/instance=cert-manager --tail=50 --all-containers
+          kubectl -n implementer-e2e get certificate,certificaterequest,secret,job,pod
