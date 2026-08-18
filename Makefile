@@ -8,3 +8,7 @@ e2e:
 # points at a real cluster. e2e/lib.sh looks for this exact path.
 kind-up:
 	kind create cluster --name implementer-e2e --kubeconfig $(CURDIR)/.kind.kubeconfig
+
+.PHONY: test
+test:
+	go test ./...

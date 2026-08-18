@@ -1,0 +1,77 @@
+# Stage 30's fixture. Applied by e2e/30-proxy.sh, which substitutes
+# __RUNTIME_CLASS__. Same posture as e2e/job.yaml, and deliberately holding
+# nothing but `https_proxy` and the trust bundle: that pair is the entire
+# contract between a sandbox and the credential proxy.
+#
+# ponytail: the posture block and the bundle assembly are copied from
+# e2e/job.yaml rather than shared. Two fixtures is not a template language's
+# worth of duplication; a third one is when to factor it out.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-proxy
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      __RUNTIME_CLASS__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: probe
+          image: curlimages/curl:8.21.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: SSL_CERT_FILE, value: /tmp/trust-bundle.crt }
+            - { name: CURL_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            # Lower-case, because that is the spelling every client in the
+            # sandbox agrees on. #51 adds the run's credential as userinfo here.
+            # The host is 30-proxy.sh's $RELEASE and the port is the chart's only
+            # one; both are fixed strings, so a mismatch fails this stage loudly.
+            - { name: https_proxy, value: http://credential-proxy:8080 }
+            # On the leaf's SAN list, so the proxy terminates it.
+            - { name: INTERCEPTED_URL, value: https://github.com/ }
+            # Not on it, so the proxy is a byte pipe and the chain stays the
+            # real one.
+            - { name: TUNNELLED_URL, value: https://proxy.golang.org/ }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              CA=/run/proxy-ca/ca.crt
+              cat /etc/ssl/certs/ca-certificates.crt "$CA" > /tmp/trust-bundle.crt
+
+              get() { curl -fsS -o /dev/null --max-time 20 --retry 5 --retry-connrefused "$1"; }
+
+              get "$INTERCEPTED_URL" || { echo "!!! FAIL: intercepted host unreachable"; exit 1; }
+              echo "PROBE intercepted-bundle  ok  (we terminated it and the sandbox believed us)"
+              get "$TUNNELLED_URL"   || { echo "!!! FAIL: tunnelled host unreachable"; exit 1; }
+              echo "PROBE tunnelled-bundle    ok  (everything else still gets through)"
+
+              # The differential that proves which was which. With only our CA
+              # trusted, the intercepted host still verifies — we signed that
+              # chain — and the tunnelled one cannot, because its chain is the
+              # real one and we never saw it. Either result flipping means the
+              # intercept list stopped matching the certificate.
+              export CURL_CA_BUNDLE=$CA SSL_CERT_FILE=$CA
+              get "$INTERCEPTED_URL" || { echo "!!! FAIL: the intercepted chain does not terminate at our CA"; exit 1; }
+              echo "PROBE intercepted-bare-ca ok  (the chain terminates at our CA)"
+              if get "$TUNNELLED_URL" 2>/dev/null; then # its stderr is expected
+                echo "!!! FAIL: $TUNNELLED_URL verified against our CA alone — it was intercepted"
+                exit 1
+              fi
+              echo "PROBE tunnelled-bare-ca   refused, as it must be (opaque, not terminated)"
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - name: proxy-ca
+          configMap: { name: proxy-ca }

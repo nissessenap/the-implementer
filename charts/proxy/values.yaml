@@ -1,0 +1,13 @@
+image:
+  repository: implementer-proxy
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# The Secret cert-manager writes the serving certificate to. Its SANs *are* the
+# intercept list, so this one value configures both — there is no host list here
+# to drift out of step with the certificate.
+tlsSecretName: proxy-leaf-tls
+
+resources:
+  requests: { cpu: 100m, memory: 64Mi }
+  limits: { memory: 256Mi }

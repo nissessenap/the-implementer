@@ -24,6 +24,15 @@ a cloud identity, and it is a separate pod rather than a sidecar because a
 sidecar shares the sandbox's network namespace and can be bypassed. See
 [ADR 0005](docs/adr/0005-credentials-terminate-at-the-credential-proxy.md).
 
+**Intercept list** — the hosts the credential proxy terminates TLS for, rather
+than tunnelling opaquely. Not configuration: it is read back off the SANs of the
+proxy's own serving certificate, so a host it cannot present a certificate for is
+a host it cannot intercept and the two can never drift. `*.pkg.dev` is a wildcard
+occupying the whole leftmost label, because that is the only shape `crypto/x509`
+matches — so the list is deliberately **wider** than the credential rule layered
+on it, and the per-host credential switch is what keeps `-docker.pkg.dev`
+tokenless.
+
 **Sentinel** — a worthless string standing where a credential would be
 (`GH_TOKEN=proxy-injected`). The proxy swaps it for the real token in flight.
 The point of the sentinel is that the sandbox's code path is *unchanged*: the
