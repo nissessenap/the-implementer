@@ -1,0 +1,48 @@
+# Not under gVisor, and that is the point: the proxy is not the sandbox. It is the
+# thing that holds the credential *because* the sandbox does not.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: {{ .Release.Name }} }
+  template:
+    metadata:
+      labels: { app: {{ .Release.Name }} }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # the nonroot user ko's base image ships
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: proxy
+          image: "{{ .Values.image }}"
+          # Not a value: ko tags by a hash of the binary, so nothing newer ever
+          # appears under the reference above.
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: TLS_DIR, value: /tls }
+          ports:
+            # 8080 and not a value: the sandbox is handed an `https_proxy` URL
+            # naming this port, so a knob here is only a second place to change it.
+            - containerPort: 8080
+          # tcpSocket and not a /healthz route: the proxy has no dependency to
+          # report on, so "the listener is up" is the whole of its health.
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+          volumeMounts:
+            # Mounted, not copied: the kubelet refreshes this on renewal and the
+            # proxy re-reads it per handshake, so a renewed certificate needs no
+            # restart of this Deployment.
+            - { name: tls, mountPath: /tls, readOnly: true }
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret: { secretName: {{ .Values.tlsSecretName }} }

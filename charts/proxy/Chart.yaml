@@ -1,0 +1,6 @@
+apiVersion: v2
+name: implementer-proxy
+description: The credential proxy — every credential terminates here, the sandbox holds none.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

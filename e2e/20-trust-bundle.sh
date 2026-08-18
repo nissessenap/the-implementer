@@ -65,42 +65,6 @@ spec:
 YAML
 kubectl -n "$NS" wait --for=condition=Ready pod/tls-fixture --timeout=180s
 
-# Empty in CI, `gvisor` against a local k3s. Substituted away entirely rather than
-# left empty: runtimeClassName is a *string, and "" is not a DNS subdomain.
-if [[ -n ${RUNTIME_CLASS:-} ]]; then
-  # Checked up front, as proto/go.sh did: a RuntimeClass the cluster does not have
-  # leaves the pod unschedulable and the poll below spends its whole timeout on it.
-  kubectl get runtimeclass "$RUNTIME_CLASS" >/dev/null
-  RUNTIME_CLASS_LINE="runtimeClassName: $RUNTIME_CLASS"
-else
-  RUNTIME_CLASS_LINE="# no runtimeClassName (RUNTIME_CLASS unset)"
-fi
-
 stage "apply the fixture (runtimeClassName=${RUNTIME_CLASS:-<none>})"
-# --cascade=foreground, because the default background cascade returns as soon as
-# the Job object is gone and leaves the previous run's pod being collected. The
-# poll below selects on job-name, which matches that pod too — a stale Succeeded
-# one would report this stage green without the new fixture ever having run.
-kubectl -n "$NS" delete job "$JOB" --ignore-not-found --cascade=foreground --wait >/dev/null
-sed -e "s|__RUNTIME_CLASS__|$RUNTIME_CLASS_LINE|" \
-  "$E2E_DIR/job.yaml" | kubectl apply -n "$NS" -f - >/dev/null
-
-# Polled rather than `kubectl wait --for=condition=Complete`, which blocks for the
-# full timeout when the Job fails — the case whose logs we want soonest. Multiple
-# --for flags are ANDed, so there is no one-shot Complete-or-Failed wait.
-# backoffLimit is 0, so the selector matches exactly one pod and it terminates once.
-phase=
-for _ in $(seq 100); do
-  phase=$(kubectl -n "$NS" get pod -l "job-name=$JOB" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
-  case $phase in Succeeded | Failed) break ;; esac
-  sleep 3
-done
-
-echo
-kubectl -n "$NS" logs "job/$JOB" || true
-[[ $phase == Succeeded ]] || {
-  echo "!!! FAIL: fixture pod ended in '${phase:-<no pod>}'" >&2
-  kubectl -n "$NS" describe "job/$JOB" >&2
-  exit 1
-}
+run_job "$JOB" "$E2E_DIR/job.yaml"
 echo "==> trust bundle proven"

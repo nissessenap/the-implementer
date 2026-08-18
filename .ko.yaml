@@ -1,0 +1,14 @@
+# ko builds the proxy image. There is no Dockerfile: no base image to keep
+# patched by hand, no build stage to get wrong, and no build context to prune.
+
+# The same image ko defaults to, named anyway because two of its properties are
+# load-bearing and silent: it carries the system CA bundle, which every hop the
+# proxy re-originates needs, and it runs as nonroot 65532, which is the UID the
+# chart's securityContext pins.
+defaultBaseImage: cgr.dev/chainguard/static
+
+builds:
+  # Named explicitly, because `proto/` holds prototype main packages too and the
+  # one shipped binary should never be a matter of which one ko found first.
+  - id: proxy
+    main: ./cmd/proxy
