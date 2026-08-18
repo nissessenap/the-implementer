@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Stage 10 — cert-manager, the private CA, and the leaf carrying the intercept list.
-# Credentials: none. Runs on every PR, forks included.
+# Credentials: none.
 #
-# cert-manager rather than openssl-in-a-shell-script because a production cluster
-# has it anyway, so the question worth answering is "does the cert-manager shape
-# work". Two Issuers, because a self-signed *leaf* is not a CA and nothing chains
-# to it: selfSigned Issuer -> CA Certificate -> CA Issuer -> leaf.
+# selfSigned Issuer -> CA Certificate -> CA Issuer -> leaf, because a self-signed
+# *leaf* is not a CA and nothing chains to it. cert-manager rather than openssl in a
+# shell script: a production cluster has it anyway, so the shape is the point.
 set -euo pipefail
 
 # shellcheck source=lib.sh
@@ -18,8 +17,7 @@ if ! kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
 fi
 
 # Outside the install branch on purpose: a run interrupted partway through the
-# rollout leaves the CRDs present and cert-manager not serving, and skipping the
-# wait then fails at the first apply with a webhook connection error.
+# rollout leaves the CRDs present and cert-manager not serving.
 for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
   kubectl -n cert-manager rollout status "deploy/$d" --timeout=300s
 done
@@ -29,18 +27,9 @@ kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/d
 
 # The SAN list is the *only* place the intercepted hosts are configured: the proxy
 # (#50) reads them back off its own certificate, so the two cannot drift apart.
-# github.com          git clone/push, and the OAuth-ish endpoints
-# api.github.com      gh
-# codeload / objects / raw   tarballs, LFS, release assets — cheap to include now,
-#                     expensive to discover missing halfway through a run.
-# *.pkg.dev           Artifact Registry. A wildcard, because the Go endpoint is
-#                     {region}-go.pkg.dev and pinning a region here would
-#                     reintroduce the region config #33 got rid of. `*-go.pkg.dev`
-#                     is tighter and does not work: crypto/x509 (and every other
-#                     TLS stack worth naming) only matches a wildcard occupying
-#                     the whole leftmost label. So the certificate is deliberately
-#                     *wider* than the credential rule, and #52's credFor is what
-#                     keeps -docker.pkg.dev from being handed a bearer token.
+# `*.pkg.dev` and not `*-go.pkg.dev`, because crypto/x509 only matches a wildcard
+# occupying the whole leftmost label — so the certificate is deliberately wider than
+# the credential rule, and #52's credFor is what keeps -docker.pkg.dev tokenless.
 # ponytail: a heredoc rather than a committed manifest. It becomes chart templates
 # in #50; a second home for the SAN list before then is a second thing to drift.
 CA_MANIFEST=$(cat <<'YAML'
@@ -85,36 +74,26 @@ YAML
 )
 
 # Retried rather than waited on: an Available Deployment does not mean the
-# validating webhook is callable — cainjector still has to write its caBundle and
-# the Service still needs an endpoint. Retrying is what cert-manager's own docs
-# advise for exactly this cold-cluster window.
-for _ in $(seq 30); do
-  if printf '%s\n' "$CA_MANIFEST" | kubectl apply -n "$NS" -f - >/dev/null 2>&1; then
-    APPLIED=1
-    break
-  fi
+# validating webhook is callable — cainjector still has to write its caBundle. Each
+# attempt prints its own error, so a real failure is loud without a replay.
+for i in $(seq 30); do
+  printf '%s\n' "$CA_MANIFEST" | kubectl apply -n "$NS" -f - && break
+  [[ $i -lt 30 ]] || exit 1
   sleep 5
 done
-if [[ -z ${APPLIED:-} ]]; then
-  echo "!!! the cert-manager webhook never admitted the apply. Once more, loudly:" >&2
-  printf '%s\n' "$CA_MANIFEST" | kubectl apply -n "$NS" -f -
-  exit 1
-fi
 
 kubectl -n "$NS" wait --for=condition=Ready certificate/proxy-ca --timeout=180s
 kubectl -n "$NS" wait --for=condition=Ready certificate/proxy-leaf --timeout=180s
 
 # The sandbox needs the CA certificate and must never see either key, so it gets a
-# ConfigMap holding only ca.crt rather than a mount of a TLS Secret.
-# ponytail: cert-manager's trust-manager does exactly this distribution in
-# production. One more install to answer a question this `kubectl get` answers.
+# ConfigMap holding only ca.crt. A Secret mount with `items` would also hide the
+# key, but leaves the CA private key one careless edit away from the sandbox.
+# ponytail: cert-manager's trust-manager does this distribution in production. One
+# more install to answer a question this `kubectl get` answers.
 kubectl -n "$NS" create configmap proxy-ca \
   --from-literal=ca.crt="$(kubectl -n "$NS" get secret proxy-ca-tls -o jsonpath='{.data.ca\.crt}' | base64 -d)" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-echo "==> CA:"
-kubectl -n "$NS" get secret proxy-ca-tls -o jsonpath='{.data.ca\.crt}' | base64 -d \
-  | openssl x509 -noout -subject -dates
 echo "==> leaf SANs (== the proxy's intercept list):"
 kubectl -n "$NS" get secret proxy-leaf-tls -o jsonpath='{.data.tls\.crt}' | base64 -d \
   | openssl x509 -noout -ext subjectAltName

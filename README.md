@@ -49,10 +49,9 @@ RUNTIME_CLASS=gvisor make e2e       # gVisor, where a RuntimeClass exists
 ```
 
 The harness is `KUBECONFIG`-driven and assumes nothing about the cluster's
-flavour. It is staged by the credentials each stage needs: the unauthenticated
-stages run on every pull request, forks included, and a stage that needs a GitHub
-App or GCP skips cleanly when its secrets are absent. Adding a stage is adding a
-file to [`e2e/`](e2e/).
+flavour. Stages run in filename order, and every stage so far is unauthenticated,
+so the whole thing runs on fork pull requests too. Adding a stage is adding a file
+to [`e2e/`](e2e/).
 
 ## Roadmap
 
