@@ -1,0 +1,18 @@
+name: e2e
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: make kind-up
+      - run: make e2e
+      # The cluster dies with the runner, so anything not printed here is gone.
+      - if: failure()
+        run: kubectl get pod -A -o wide
