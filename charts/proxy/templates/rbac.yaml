@@ -1,0 +1,32 @@
+# The proxy's whole cluster access: pods, in this namespace, read-only. Run
+# identity is on the Pod (ADR 0004 writes it there twice for exactly this reader),
+# so there is no Job to get and no ownerReference to follow — and nothing here
+# grants Secrets, which is the access a compromised proxy would want most.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}
+rules:
+  # watch as well as list, because the resolver is an informer index: a
+  # fieldSelector on status.podIP would be a full apiserver list-and-filter per
+  # request, since only spec.nodeName is indexed.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}

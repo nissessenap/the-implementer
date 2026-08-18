@@ -2,6 +2,9 @@
 # Sourced by every e2e stage, not executed.
 
 NS=${NS:-implementer-e2e}
+# The proxy's Helm release, and so its Deployment and Service names. Here rather
+# than in a stage, because two stages install against it and read its log.
+RELEASE=${RELEASE:-credential-proxy}
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # `make kind-up` writes here; a local k3s just exports KUBECONFIG.
@@ -23,6 +26,21 @@ fi
 
 stage() { printf '\n=== %s: %s\n' "$(basename "$0")" "$*" >&2; }
 
+# The one long-lived key the run secret derives from. A literal here because the
+# e2e is both ends at once — it plays the orchestrator, which mints the credential,
+# and installs the proxy, which recomputes it. In a cluster this is a Secret both
+# mount and neither of them ships.
+RUN_KEY=${RUN_KEY:-e2e-shared-run-key-not-a-real-one}
+
+# run_cred <owner> <repo> <issue> <run-uid> — the userinfo the orchestrator puts in
+# the sandbox's https_proxy URL. Recomputed by the proxy from the pod's own
+# annotations, so the two agreeing is the whole authentication.
+run_cred() {
+  local user="$1,$2,$3,$4"
+  printf '%s:%s' "$user" \
+    "$(printf '%s' "$user" | openssl dgst -sha256 -hmac "$RUN_KEY" -r | cut -d' ' -f1)"
+}
+
 # Empty in CI, `gvisor` against a local k3s. Substituted away entirely rather than
 # left empty: runtimeClassName is a *string, and "" is not a DNS subdomain.
 runtime_class_line() {
@@ -37,18 +55,22 @@ runtime_class_line() {
   fi
 }
 
-# run_job <name> <manifest> — apply a Job fixture, wait for its single pod, print
-# its logs, and fail the stage unless it succeeded.
+# run_job <name> <manifest> [KEY=value…] — apply a Job fixture, wait for its single
+# pod, print its logs, and fail the stage unless it succeeded. Each KEY=value
+# replaces __KEY__ in the manifest, on top of __RUNTIME_CLASS__.
 run_job() {
-  local job=$1 manifest=$2 rcl phase=
+  local job=$1 manifest=$2 rcl phase= kv
+  shift 2
   rcl=$(runtime_class_line)
+  local -a subst=(-e "s|__RUNTIME_CLASS__|$rcl|")
+  for kv in "$@"; do subst+=(-e "s|__${kv%%=*}__|${kv#*=}|g"); done
 
   # --cascade=foreground, because the default background cascade returns as soon
   # as the Job object is gone and leaves the previous run's pod being collected.
   # The poll below selects on job-name, which matches that pod too — a stale
   # Succeeded one would report the stage green without the fixture having run.
   kubectl -n "$NS" delete job "$job" --ignore-not-found --cascade=foreground --wait >/dev/null
-  sed -e "s|__RUNTIME_CLASS__|$rcl|" "$manifest" | kubectl apply -n "$NS" -f - >/dev/null
+  sed "${subst[@]}" "$manifest" | kubectl apply -n "$NS" -f - >/dev/null
 
   # Polled rather than `kubectl wait --for=condition=Complete`, which blocks for
   # the full timeout when the Job fails — the case whose logs we want soonest.
@@ -61,7 +83,7 @@ run_job() {
   done
 
   echo
-  kubectl -n "$NS" logs "job/$job" || true
+  kubectl -n "$NS" logs "job/$job" --all-containers=true || true
   [[ $phase == Succeeded ]] || {
     echo "!!! FAIL: $job ended in '${phase:-<no pod>}'" >&2
     kubectl -n "$NS" describe "job/$job" >&2

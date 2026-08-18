@@ -9,6 +9,13 @@ image: ko.local/proxy:latest
 # to drift out of step with the certificate.
 tlsSecretName: proxy-leaf-tls
 
+# The Secret holding the one long-lived key the run secret is derived from,
+# mounted by this proxy and by the orchestrator. There is no per-run Secret: the
+# orchestrator computes HMAC-SHA256(key, run) when it builds the Job and the proxy
+# recomputes it here, so nothing is handed over between them.
+runKeySecretName: proxy-run-key
+runKeySecretKey: key
+
 resources:
   requests: { cpu: 100m, memory: 64Mi }
   limits: { memory: 256Mi }

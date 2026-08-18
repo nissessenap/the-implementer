@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -156,6 +157,12 @@ func TestCertsLoadFails(t *testing.T) {
 	}
 }
 
+// The run every test authenticates as, and the key its secret derives from.
+var (
+	testKey = []byte("shared key")
+	testRun = Run{Owner: "acme", Repo: "widgets", Issue: "5", UID: "run-1"}
+)
+
 // proxyFor stands up the proxy plus a TLS upstream holding the same leaf, and
 // returns the proxy's address along with a pointer to the last address dialled.
 func proxyFor(t *testing.T, sans ...string) (proxyAddr string, dialed *string, gotHost *string, pool *x509.CertPool) {
@@ -180,7 +187,7 @@ func proxyFor(t *testing.T, sans ...string) (proxyAddr string, dialed *string, g
 	up.StartTLS()
 	t.Cleanup(up.Close)
 
-	s := New(certs)
+	s := New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil })
 	s.tr.TLSClientConfig.RootCAs = pool
 	addr := new(string)
 	real := (&net.Dialer{}).DialContext
@@ -202,10 +209,14 @@ func connect(t *testing.T, proxyAddr, authority, pipelined string) (net.Conn, *b
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
+	// The credential every client derives from the https_proxy URL's userinfo.
+	user, pass := Cred(testKey, testRun)
+	auth := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 	// pipelined goes out in the same write, unread: a client is entitled to send
 	// its first payload bytes without waiting for the 200, and they must survive
 	// the hijack.
-	if _, err := io.WriteString(c, "CONNECT "+authority+" HTTP/1.1\r\nHost: "+authority+"\r\n\r\n"+pipelined); err != nil {
+	if _, err := io.WriteString(c, "CONNECT "+authority+" HTTP/1.1\r\nHost: "+authority+
+		"\r\nProxy-Authorization: Basic "+auth+"\r\n\r\n"+pipelined); err != nil {
 		t.Fatal(err)
 	}
 	br := bufio.NewReader(c)
@@ -273,7 +284,7 @@ func TestTunnelIsOpaque(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	px := httptest.NewServer(New(certs))
+	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }))
 	defer px.Close()
 
 	// Pipelined, so this also asserts the bytes buffered with the CONNECT are not

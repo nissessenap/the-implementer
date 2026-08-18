@@ -7,10 +7,11 @@
 // the entire cost of extracting the proxy to its own repository later, which is
 // the plan if it works out. Shared types are worth less than the seam.
 //
-// What is here so far is the skeleton: an https_proxy that terminates TLS for the
-// hosts its own certificate names and tunnels everything else opaquely. The
+// What is here so far: an https_proxy that authenticates the run calling it,
+// resolves that run's identity from Kubernetes, and terminates TLS for the hosts
+// its own certificate names while tunnelling everything else opaquely. The
 // credentials it exists to attach land on top of it — the sentinel swap (#52),
-// GAR (#54) and Vertex (#55) — as is caller authentication (#51).
+// GAR (#54) and Vertex (#55).
 //
 // Egress is unrestricted on purpose: the allowlist and the NetworkPolicy are
 // post-MVP with #16. Every CONNECT is logged, which is the inventory that ticket
@@ -38,19 +39,28 @@ const (
 type Server struct {
 	certs *Certs
 
+	// The shared key the run secret is derived from, and the source-IP to run
+	// lookup it must agree with. A field rather than a *Pods, so a test needs no
+	// apiserver — and so the two identity halves stay swappable independently.
+	key     []byte
+	resolve func(ctx context.Context, ip string) (Run, error)
+	fails   failLimiter
+
 	// dial reaches an upstream. A field so a test can assert *what address the
 	// proxy dialled* — the pin below is a one-line bug otherwise.
 	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	tr   *http.Transport
 }
 
-// New builds the proxy around a certificate. Everything it will later attach a
-// credential to hangs off this — the certificate is what decides which hosts it
-// may terminate at all.
-func New(certs *Certs) *Server {
+// New builds the proxy around a certificate, the shared run key, and a resolver
+// from source IP to run. The certificate decides which hosts it may terminate;
+// the other two decide who may ask it to.
+func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) (Run, error)) *Server {
 	s := &Server{
-		certs: certs,
-		dial:  (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		certs:   certs,
+		key:     key,
+		resolve: resolve,
+		dial:    (&net.Dialer{Timeout: dialTimeout}).DialContext,
 	}
 	s.tr = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -65,6 +75,18 @@ func New(certs *Certs) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// First, and before the hijack: past that point the client has been told
+	// "200 Connection Established" and there is no way left to refuse it.
+	run, code, err := s.authenticate(r)
+	if err != nil {
+		log.Printf("%s %s %s refused: %v", r.RemoteAddr, r.Method, r.Host, err)
+		if code == http.StatusProxyAuthRequired {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="the-implementer"`)
+		}
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
+
 	if r.Method == http.MethodConnect {
 		// r.Host is the CONNECT authority, and from here on it is the only
 		// thing that decides where the bytes go.
@@ -73,6 +95,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "CONNECT needs host:port", http.StatusBadRequest)
 			return
 		}
+		// The run is logged with the destination because that pairing is what
+		// #52 onwards mints against: this run's repository, never the URL's.
+		log.Printf("CONNECT %s for %s", r.Host, run)
 		if s.certs.Intercepts(host) {
 			s.intercept(w, r)
 		} else {
