@@ -248,8 +248,27 @@ resolved digest — enough to explain any run after the fact.
   `go.mod` exists. No system in [the survey][survey] does this.
 - **Falling back to `implementer-base` when nothing is detected.** Correct for
   scaffolding tasks, silently wrong for every unconfigured compiled language.
+- **No detection at all: one image per *agent CLI*, with dependency setup pushed
+  into a per-repository `setupCommand`.** Added 2026-08-10 from
+  [the Kelos research][kelosresearch] — a fourth option this ADR never considered,
+  and worth recording because it is neither of the two it framed the decision
+  between. [Kelos][kelos] ships exactly this: five images, one per agent CLI, and
+  **zero** toolchain detection (no hits for `go.mod`, `package.json`, `pyproject`,
+  `GET /languages` or "toolchain" outside its tests). What varies per repository is
+  a `setupCommand` on a `Workspace` object, base64-decoded and executed by the
+  entrypoint before the agent runs.
+
+  Not adopted: it does not remove the problem, it **relocates it onto whoever writes
+  the `Workspace`** — one hand-maintained setup script per repository, which is the
+  per-repository-table alternative above wearing different clothes, and it scales the
+  same wrong way. It also moves dependency installation from an image layer into a
+  cold shell command on every run. Recorded because it is a legitimate design that a
+  real system runs in production, and because it is the shape to reach for if
+  detection ever proves unreliable in a way configuration cannot patch.
 
 [map]: https://github.com/nissessenap/the-implementer/issues/1
+[kelos]: https://github.com/kelos-dev/kelos
+[kelosresearch]: ../research/kelos-and-kubefoundry.md
 [adr1]: 0001-sandbox-image-strategy-and-byo-contract.md
 [adr2]: 0002-a-run-executes-as-a-kubernetes-job.md
 [survey]: https://github.com/nissessenap/the-implementer/issues/7

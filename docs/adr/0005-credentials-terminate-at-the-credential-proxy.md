@@ -91,6 +91,20 @@ The sandbox's `GH_TOKEN` is the literal string `proxy-injected`. The proxy
 terminates TLS for `github.com` with a cert-manager leaf and substitutes a real
 installation token in flight.
 
+**Why intercept at all, rather than redirect.** Stated because it was missing, and
+its absence made this section look like an unexamined premise. `git`'s
+`url.<proxy>.insteadOf` plus `GH_HOST` achieves the same sentinel swap with no
+cert-manager, no seven CA variables, no HTTP/1.1 downgrade and no certificate
+rotation bug — so interception is a **choice**, not a necessity, and the honest
+argument for it is one the page did not make: **static rewriting only covers URLs
+we wrote.** The agent composes its own — a `curl` in a test script, a `gh api` call
+against a host we did not anticipate, a submodule URL in the repository. Rewrite
+rules cover the paths we enumerated and silently miss the rest, and "silently
+misses" here means the sentinel travels to a third party. Interception covers every
+URL that resolves to a name on the certificate, which is the property `credFor` and
+the SAN list are built on. Keep this paragraph: without it, someone deletes the
+interception in six months and the swap keeps working in every case they tested.
+
 Verified with free preflight probes, no agent turn: the sandbox sent the
 sentinel and got `rate_limit=5000` — GitHub gives 60/h anonymous and 5000/h
 authenticated, so the number is only reachable if the swap happened inside a TLS
@@ -149,20 +163,53 @@ every installation", and with KMS there is no holder.
 > **Amended by [the credential-broker survey][cbsurvey] §4.4: the pod-IP lookup
 > is not sufficient as the *sole* identity.** Pod IPs are ephemeral and reused, so
 > a recycled IP can map to the wrong run — `kube2iam` has this same hole and does
-> not solve it. And as written the proxy authenticates no caller at all
-> ([#37][callercomment]). Both close with one mechanism: a **per-run secret in
-> `Proxy-Authorization`**, injected into the Job by the orchestrator (which
-> already knows the run), with the pod-IP annotation lookup as a **second factor
-> that must agree**. `NetworkPolicy` then becomes defence in depth rather than the
-> only control. Mechanism notes: resolve the IP off an informer index, not a
-> `status.podIP` fieldSelector (only `spec.nodeName` is indexed, so a
-> fieldSelector is a full apiserver list-and-filter); and rate-limit proxy-auth
-> failures before the `CONNECT` hijack.
+> not solve it. Both close with one mechanism: a **per-run secret**, injected into
+> the Job by the orchestrator (which already knows the run), with the pod-IP
+> annotation lookup as a **second factor that must agree**. `NetworkPolicy` then
+> becomes defence in depth rather than the only control. Mechanism notes: resolve
+> the IP off an informer index, not a `status.podIP` fieldSelector (only
+> `spec.nodeName` is indexed, so a fieldSelector is a full apiserver
+> list-and-filter); and rate-limit proxy-auth failures before the `CONNECT` hijack.
+>
+> **Amended again 2026-08-10, on two points.**
+>
+> **1. The secret rides in the `https_proxy` URL's userinfo, not in a
+> `Proxy-Authorization` header we ask each client to add.**
+> `https_proxy=http://<run-id>:<secret>@<proxy>:8080` — every client derives
+> `Proxy-Authorization: Basic base64(run-id:secret)` from it unaided, which is how
+> `sandbox-runtime` does it (`src/sandbox/sandbox-utils.ts:478-481`, `:530-534`;
+> it also packs a command tag into the username for per-invocation attribution).
+> One environment variable we already set covers `git`, `gh`, `go`, `pip` and
+> `curl`; a header covers whatever we remembered to configure.
+>
+> **The proxy derives the secret rather than being told it**, which is what keeps
+> the no-per-run-Secret property this section is built on:
+> `HMAC-SHA256(shared-key, owner/repo#issue + job-UID)`. One long-lived key in one
+> Secret, mounted by the orchestrator and the proxy; the orchestrator computes it
+> when building the Job, the proxy recomputes it from the claimed run-id and
+> compares. No per-run object, no handover, no orchestrator→proxy channel.
+> Validate the secret **first** — stateless, cheap, rate-limited, before the
+> `CONNECT` hijack — then resolve the annotation, then require the two to agree.
+> Leaking it to the sandbox costs nothing: it authenticates *the run*, and a
+> compromised sandbox already **is** that run.
+>
+> **2. The survey's claim that "the proxy authenticates no caller at all" is too
+> strong, and the narrower version is the one to design against.** The pod-IP →
+> Pod → annotation lookup *does* authenticate: an unrelated pod in the namespace
+> resolves to a Pod carrying no run annotations and is rejected, which closes the
+> hole [the Flue research][flue] §6 found in the prototype ([#37][callercomment]).
+> What the secret actually buys is **informer-cache staleness under IP reuse** —
+> pod A's run ends, its IP is recycled to pod B, the cache still maps that IP to A,
+> and B mints for A's repository — plus a check that does not depend on the cache
+> at all. Stating it precisely matters: "authenticates no caller" invites a reader
+> to treat the lookup as decorative and drop it.
 >
 > ⚠️ **Landmine:** `git` 407s against a proxy requiring authentication unless
 > `GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic'` is set in the sandbox —
-> which is exactly what `anthropic-experimental/sandbox-runtime` does. Nothing
-> else breaks, so this fails in one place only, loudly.
+> which is exactly what `anthropic-experimental/sandbox-runtime` does
+> (`src/sandbox/sandbox-utils.ts:539`). Its comment gives the sharper reason: pre-send
+> Basic so `git` never sees the 407 and so never invokes a **credential helper** for
+> the proxy URL. Nothing else breaks, so this fails in one place only, loudly.
 
 Practical notes for implementation:
 
@@ -251,7 +298,7 @@ turns the structural protection above back into a rule someone has to remember.
 Any candidate lacking per-hostname selective MITM is disqualified without further
 review.
 
-### The trust seam: five variables, and four of them replace
+### The trust seam: seven variables, and six of them replace
 
 The sandbox must trust the proxy's CA. Under `readOnlyRootFilesystem: true` that
 means environment variables, never `update-ca-certificates`.
@@ -262,6 +309,8 @@ means environment variables, never `update-ca-certificates`.
 | `git` (libcurl) | `GIT_SSL_CAINFO` |
 | `curl` | `CURL_CA_BUNDLE` |
 | `pip` | `PIP_CERT` — carries its own bundle, ignores `SSL_CERT_FILE` entirely |
+| Python `requests` / `httpx` / `urllib3` / botocore | `REQUESTS_CA_BUNDLE` |
+| AWS CLI, botocore | `AWS_CA_BUNDLE` |
 | agent CLI (Node) | `NODE_EXTRA_CA_CERTS` |
 
 **Everything except `NODE_EXTRA_CA_CERTS` *replaces* the trust store rather than
@@ -269,7 +318,15 @@ adding to it.** Point them at `ca.crt` alone and the sandbox verifies the proxy
 perfectly and nothing else on the internet — failing on the first unrelated
 HTTPS call, far from its cause. The value must be the system bundle
 concatenated with the proxy's CA. Assembled by the **phase script at run-plan
-start**; see [ADR 0001][adr1], which this was folded into.
+start**; see [ADR 0001][adr1], which this was folded into — and which carries the
+same table, so **amend both or they drift**, which is the failure this ADR goes out
+of its way to prevent for the certificate SAN list.
+
+The last two rows were added 2026-08-10; `REQUESTS_CA_BUNDLE` is a genuine gap
+rather than completeness, because `PIP_CERT` covers `pip` and nothing covered a
+test suite or an agent-written script that imports `requests`. [ADR 0001][adr1]
+records the four variables deliberately not adopted, and why Windows and macOS
+trust paths are out of scope.
 
 cert-manager needs **two** Issuers, because a self-signed *leaf* is not a CA and
 nothing chains to it: `selfSigned` Issuer → CA `Certificate` → `ca` Issuer →
@@ -312,10 +369,21 @@ allowlist. But proxy environment variables are **best-effort routing**. What
   behaved exactly as predicted — the phase script's credential path never
   changed.**
 - **Push-branch enforcement becomes available**, retiring a limit this project
-  accepted from charting onward: GitHub cannot scope a token to a branch prefix,
-  and the repo-owner branch ruleset that papers over it is advisory. A proxy can
-  express it. This is the strongest single reason the expensive half was worth
+  accepted from charting onward: GitHub cannot scope a token to a branch prefix.
+  A proxy can. This is the strongest single reason the expensive half was worth
   building.
+
+  ⚠️ **Corrected 2026-08-10 — the earlier wording called the repo-owner branch
+  ruleset "advisory", and it is not.** GitHub's own docs: *"only users with bypass
+  permissions can push to branches or tags whose name matches the pattern."* A
+  ruleset genuinely enforces. The true claim is narrower and still sufficient: a
+  prefix ruleset confines every run to `implementer/*` but **cannot express per-run
+  scoping** — it cannot stop run #12 pushing to `implementer/issue-9`. That is what
+  only the proxy can express, and it is also all it needs to be worth building.
+  Recorded because the overstatement was load-bearing for "the strongest single
+  reason", and a reason that overstates its case is the kind someone later
+  rediscovers as wrong and discards along with the decision. Found by
+  [the Flue research][flue] §6.
 - **Cost in latency: an upper bound of ~23 %** (202 s → 249 s), and that bundles
   the proxy hop with a *provider* and *model* change, so it overstates the hop.
   The GitHub interception is invisible — one extra termination against 150–350 ms
@@ -349,6 +417,28 @@ allowlist. But proxy environment variables are **best-effort routing**. What
   The interim mechanism Anthropic point at, and strictly better than a static
   org key — but it keeps a live credential in the same context as untrusted
   issue text, which is the combination both published incidents exploit.
+- **An Anthropic API key at the *proxy*, instead of Vertex.** Added 2026-08-10;
+  [the Flue research][flue] §6 correctly noted this ADR rejected a key *in the pod*
+  and never considered one *at the proxy*, which is a different and much better
+  proposition. It preserves "the sandbox holds no credential" completely — same
+  sentinel mechanism, `ANTHROPIC_BASE_URL` plus a worthless `ANTHROPIC_API_KEY`
+  swapped in flight — while deleting `roles/aiplatform.user`, the four model pins,
+  the `opus` alias remap that otherwise 404s `/code-review`'s subagents, and the
+  provider/model confound in the ~23 % latency figure. It does **not** delete
+  Workload Identity Federation: GAR injection is in MVP, so
+  `roles/artifactregistry.reader` and the WI binding survive either way. (The Flue
+  research overstates the saving on that point.)
+
+  **Rejected, on one property.** It makes the number of key *holders* one. The
+  entire argument that a single minting component is defensible rather than a
+  concentration of risk is that *"what the proxy holds is not a key but a
+  revocable, audit-logged capability… with KMS there is no holder"* — and KMS stays
+  for the GitHub App regardless, so adopting an API key would mean asserting the
+  zero-holder property for one credential while a plain secret sits beside it. The
+  model pins are an annoyance; the zero-holder claim is the load-bearing one.
+  Recorded rather than dismissed, because the smaller MVP is a real option: an
+  operator with no Vertex access should reach for this first, and doing so costs
+  them nothing structural.
 - **A sidecar proxy.** Shares the pod network namespace, so it is a cooperative
   boundary rather than a real one. `gh-aw` does this successfully in Docker via
   DNAT with `NET_ADMIN` dropped before user code runs; in Kubernetes a separate
@@ -381,6 +471,7 @@ allowlist. But proxy environment variables are **best-effort routing**. What
   [#2416][ag2416] lands and a KMS signer appears.**
 
 [cbsurvey]: ../research/credential-brokers-and-whether-to-buy-the-proxy.md
+[flue]: ../research/flue-and-the-orchestrator-question.md
 [ghait]: https://github.com/isometry/ghait
 [octosts]: https://github.com/octo-sts/app
 [ag2416]: https://github.com/agentgateway/agentgateway/issues/2416

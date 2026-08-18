@@ -30,16 +30,25 @@ The point of the sentinel is that the sandbox's code path is *unchanged*: the
 phase script still builds an authenticated URL, the value is just no longer
 worth stealing.
 
-**Run identity** — `owner`, `repo` and `issue` in the Job's **annotations**, not
-its labels, because repository names exceed the 63-character label-value cap.
-The informer reads them to get back to the issue, and the proxy resolves them
-from a request's source pod IP to know which repository to mint for.
-Non-negotiable: mint for the annotation's repository, never for the one the
-request URL names.
+**Run identity** — `owner`, `repo` and `issue` in **annotations**, not labels,
+because repository names exceed the 63-character label-value cap. Written in **two
+places**: the Job's own metadata and `spec.template.metadata.annotations`, because a
+Pod inherits only the latter. The informer reads them to get back to the issue, and
+the proxy resolves them from a request's source pod IP — to a **Pod**, which is why
+the second copy exists and why the proxy needs no RBAC beyond pods. Non-negotiable:
+mint for the annotation's repository, never for the one the request URL names.
+
+**Run secret** — a per-run value the orchestrator derives as
+`HMAC-SHA256(shared-key, owner/repo#issue + job-UID)` and injects into the sandbox as
+userinfo in the `https_proxy` URL, so every client sends it without being configured
+to. The proxy recomputes it rather than being told it, so there is no per-run Secret
+and no orchestrator→proxy channel. It authenticates the *run*, which is why leaking
+it to the sandbox costs nothing; what it actually guards is **run identity** against
+informer-cache staleness when a pod IP is reused.
 
 **Trust bundle** — the system CA bundle concatenated with the proxy's CA,
 assembled by the phase script at run-plan start. A bundle rather than a bare
-`ca.crt` because four of the five trust variables *replace* the trust store
+`ca.crt` because six of the seven trust variables *replace* the trust store
 rather than adding to it.
 
 ## Sandbox and images
