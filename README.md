@@ -48,7 +48,9 @@ export KUBECONFIG=…; make e2e       # or any cluster you already have
 RUNTIME_CLASS=gvisor make e2e       # gVisor, where a RuntimeClass exists
 ```
 
-It needs `kubectl`, `docker` and `helm` on `PATH`. The harness is
+It needs `kubectl`, `helm`, `docker` and Go on `PATH` — Go because the
+proxy image is built with [ko](https://ko.build) (`make image`), which needs
+nothing installed itself. The harness is
 `KUBECONFIG`-driven and assumes nothing else about the cluster's flavour but one
 thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything

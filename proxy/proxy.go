@@ -33,8 +33,8 @@ const (
 	handshakeTimeout = 30 * time.Second
 )
 
-// Server is the https_proxy. One handler: CONNECT is either intercepted or
-// tunnelled, and nothing else is served but the health check.
+// Server is the https_proxy. One handler, and it serves exactly one method:
+// CONNECT is either intercepted or tunnelled, and nothing else is served at all.
 type Server struct {
 	certs *Certs
 
@@ -80,10 +80,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if r.URL.Path == "/healthz" {
-		_, _ = w.Write([]byte("ok\n"))
-		return
-	}
 	http.Error(w, "this proxy serves CONNECT", http.StatusNotImplemented)
 }
 
@@ -121,7 +117,6 @@ func hijack(w http.ResponseWriter) (net.Conn, bool) {
 // for. The sandbox's whole egress still funnels through here, so the log line is
 // an egress inventory even where the payload is none of our business.
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
 	up, err := s.dial(r.Context(), "tcp", r.Host)
 	if err != nil {
 		log.Printf("CONNECT %s dial: %v", r.Host, err)
@@ -139,9 +134,8 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request) {
 
 	done := make(chan struct{})
 	go func() { _, _ = io.Copy(up, down); close(done) }()
-	n, _ := io.Copy(down, up)
+	_, _ = io.Copy(down, up)
 	<-done
-	log.Printf("CONNECT %s closed bytes_down=%d dur=%s", r.Host, n, time.Since(start).Round(time.Millisecond))
 }
 
 // intercept terminates TLS with our own certificate for the name the client asked

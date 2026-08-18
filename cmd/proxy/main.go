@@ -20,14 +20,8 @@ func main() {
 		log.Fatalf("TLS_DIR=%s: %v", dir, err)
 	}
 
-	addr := ":" + envOr("PORT", "8080")
-	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, proxy.New(certs)))
-}
-
-func envOr(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
+	// :8080 and not a knob: the sandbox is handed an `https_proxy` URL naming
+	// this port, so a second place to change it is a second place to get it wrong.
+	log.Print("listening on :8080")
+	log.Fatal(http.ListenAndServe(":8080", proxy.New(certs)))
 }

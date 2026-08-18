@@ -6,11 +6,13 @@ set -euo pipefail
 
 # shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
-IMG=implementer-proxy:e2e
 RELEASE=credential-proxy
 
-stage "build and load $IMG"
-docker build -q -t "$IMG" "$E2E_DIR/.." >/dev/null
+stage "build the image with ko"
+# `make image` prints the reference and nothing else. Its tag is a hash of the
+# binary, so an unchanged proxy reinstalls as a no-op and a changed one rolls.
+IMG=$(make -s -C "$E2E_DIR/.." image)
+stage "load $IMG"
 load_image "$IMG"
 
 stage "install the chart"
@@ -18,9 +20,7 @@ stage "install the chart"
 # only place the intercepted hosts are named — there is no host list in values.yaml
 # to drift away from the certificate.
 helm upgrade --install "$RELEASE" "$E2E_DIR/../charts/proxy" -n "$NS" \
-  --set image.tag="${IMG#*:}" --wait --timeout=180s >/dev/null
-# The tag never changes, so a rebuilt image needs the pod replaced explicitly.
-kubectl -n "$NS" rollout restart "deploy/$RELEASE" >/dev/null
+  --set-string image="$IMG" --wait --timeout=180s >/dev/null
 kubectl -n "$NS" rollout status "deploy/$RELEASE" --timeout=180s
 
 stage "probe through the proxy (runtimeClassName=${RUNTIME_CLASS:-<none>})"

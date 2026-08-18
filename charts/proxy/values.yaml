@@ -1,7 +1,8 @@
-image:
-  repository: implementer-proxy
-  tag: dev
-  pullPolicy: IfNotPresent
+# The full image reference, digest and all: `make image` builds it with ko and
+# prints exactly this string. One value rather than repository/tag/pullPolicy,
+# because ko names the image itself — and because a rebuilt binary is a new
+# digest, which is what makes a redeploy replace the pod on its own.
+image: ko.local/proxy:latest
 
 # The Secret cert-manager writes the serving certificate to. Its SANs *are* the
 # intercept list, so this one value configures both — there is no host list here

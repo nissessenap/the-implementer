@@ -14,26 +14,29 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65532 # distroless nonroot
+        runAsUser: 65532 # the nonroot user ko's base image ships
         runAsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: proxy
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.image }}"
+          # Not a value: ko tags by a hash of the binary, so nothing newer ever
+          # appears under the reference above.
+          imagePullPolicy: IfNotPresent
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
           env:
             - { name: TLS_DIR, value: /tls }
+          ports:
             # 8080 and not a value: the sandbox is handed an `https_proxy` URL
             # naming this port, so a knob here is only a second place to change it.
-            - { name: PORT, value: "8080" }
-          ports:
             - containerPort: 8080
+          # tcpSocket and not a /healthz route: the proxy has no dependency to
+          # report on, so "the listener is up" is the whole of its health.
           readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            tcpSocket: { port: 8080 }
           volumeMounts:
             # Mounted, not copied: the kubelet refreshes this on renewal and the
             # proxy re-reads it per handshake, so a renewed certificate needs no
