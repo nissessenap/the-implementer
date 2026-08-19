@@ -24,6 +24,23 @@ E2E_GITHUB_TOKEN=$(gh auth token) E2E_GITHUB_REPO=nissessenap/scratch make e2e
 ```
 
 It needs `repo` scope, which `gh auth login` grants by default — check with
-`gh auth status`. Stage 60 mints as a **GitHub App** and `gh` has no token for
-that; it needs `E2E_GITHUB_APP_ID` and the App's PEM, so it stays skipped unless
-someone points it at a real App.
+`gh auth status`.
+
+Stage 60 mints as a **GitHub App** and `gh` has no token for that, so it stays
+skipped unless pointed at a real one. What the App needs:
+
+- **Contents: read & write** (the clone and the push probe) plus Metadata: read.
+  No installation id anywhere — the proxy resolves one per run from the run's own
+  repository.
+- `E2E_GITHUB_APP_KEY` is a **path** to GitHub's downloaded PEM, byte-for-byte
+  (PKCS#1, `BEGIN RSA PRIVATE KEY`). Not the key's contents: the harness mounts
+  the file as a Secret, and an inline key is one `echo` away from a transcript.
+- `E2E_GITHUB_OTHER_REPO` is optional and only earns its keep when it is
+  **private *and* in the same installation**. Public and the clone succeeds
+  anonymously — a false FAIL. Outside the installation and it fails for the wrong
+  reason — a false pass that proves nothing about the scoping.
+
+```sh
+E2E_GITHUB_APP_ID=… E2E_GITHUB_APP_KEY=~/.secrets/app.pem \
+  E2E_GITHUB_REPO=me/scratch E2E_GITHUB_OTHER_REPO=me/other-private ./e2e/60-github-mint.sh
+```
