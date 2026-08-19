@@ -14,6 +14,15 @@ spec:
   backoffLimit: 0
   activeDeadlineSeconds: 300
   template:
+    metadata:
+      # Run identity, where the proxy reads it: on the Pod. A Job's own metadata
+      # does not reach its pods, which is why ADR 0004 writes it in both places.
+      # The proxy recomputes the credential below from exactly these four values.
+      annotations:
+        implementer.dev/owner: acme
+        implementer.dev/repo: widgets
+        implementer.dev/issue: "5"
+        implementer.dev/run-uid: stage30
     spec:
       restartPolicy: Never
       __RUNTIME_CLASS__
@@ -33,10 +42,12 @@ spec:
             - { name: SSL_CERT_FILE, value: /tmp/trust-bundle.crt }
             - { name: CURL_CA_BUNDLE, value: /tmp/trust-bundle.crt }
             # Lower-case, because that is the spelling every client in the
-            # sandbox agrees on. #51 adds the run's credential as userinfo here.
-            # The host is 30-proxy.sh's $RELEASE and the port is the chart's only
-            # one; both are fixed strings, so a mismatch fails this stage loudly.
-            - { name: https_proxy, value: http://credential-proxy:8080 }
+            # sandbox agrees on, and with the run's credential as userinfo —
+            # which is how git, gh, go, pip and curl all send
+            # `Proxy-Authorization` without being configured to. The host is
+            # lib.sh's $RELEASE and the port is the chart's only one; both
+            # are fixed strings, so a mismatch fails this stage loudly.
+            - { name: https_proxy, value: "http://__RUN_CRED__@credential-proxy:8080" }
             # On the leaf's SAN list, so the proxy terminates it.
             - { name: INTERCEPTED_URL, value: https://github.com/ }
             # Not on it, so the proxy is a byte pipe and the chain stays the

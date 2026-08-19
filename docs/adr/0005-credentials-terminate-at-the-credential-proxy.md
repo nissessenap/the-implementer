@@ -210,6 +210,31 @@ every installation", and with KMS there is no holder.
 > (`src/sandbox/sandbox-utils.ts:539`). Its comment gives the sharper reason: pre-send
 > Basic so `git` never sees the 407 and so never invokes a **credential helper** for
 > the proxy URL. Nothing else breaks, so this fails in one place only, loudly.
+>
+> **Amended again 2026-08-19, on the message the HMAC covers**, by what turned out
+> to be writable into a Job. Both changes are implemented in `proxy/identity.go`.
+>
+> **1. The second factor is a `run-uid` annotation the orchestrator picks, not the
+> Job's UID.** The Job UID cannot be used: the apiserver assigns it at create time,
+> `spec.template` is immutable afterwards, and the sandbox cannot derive its own
+> secret because it holds no shared key — so nothing can ever put a real Job UID
+> into the sandbox's environment. A value the creator picks has the freshness the
+> UID was chosen for (a re-run of the same issue does not inherit the previous
+> run's credential) and can be written in both places [ADR 0004][adr4] requires.
+>
+> **2. The message is `owner,repo,issue,run-uid`, not `owner/repo#issue +
+> job-UID`.** It is byte-identical to the string that travels as the userinfo
+> *username*, so there is one encoding rather than two that can drift. Commas
+> because `/`, `#` and `@` need percent-encoding in userinfo that every client
+> would have to agree on, and no field can contain one — GitHub allows only
+> `[A-Za-z0-9._-]` in owners and repos.
+>
+> ⚠️ **Precondition: nothing between the sandbox and the proxy may SNAT.** The
+> second factor reads the connection's source address, so it assumes the pod IP
+> survives to the proxy. Cluster-internal ClusterIP traffic preserves it, but ipvs
+> `masqueradeAll`, or a CNI masquerading pod-to-pod, collapses every caller to a
+> node IP — at which point *no* run resolves and the proxy refuses all of them.
+> That is a deployment precondition, not a tuning knob.
 
 Practical notes for implementation:
 

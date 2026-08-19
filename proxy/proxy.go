@@ -7,10 +7,11 @@
 // the entire cost of extracting the proxy to its own repository later, which is
 // the plan if it works out. Shared types are worth less than the seam.
 //
-// What is here so far is the skeleton: an https_proxy that terminates TLS for the
-// hosts its own certificate names and tunnels everything else opaquely. The
+// What is here so far: an https_proxy that authenticates the run calling it,
+// resolves that run's identity from Kubernetes, and terminates TLS for the hosts
+// its own certificate names while tunnelling everything else opaquely. The
 // credentials it exists to attach land on top of it — the sentinel swap (#52),
-// GAR (#54) and Vertex (#55) — as is caller authentication (#51).
+// GAR (#54) and Vertex (#55).
 //
 // Egress is unrestricted on purpose: the allowlist and the NetworkPolicy are
 // post-MVP with #16. Every CONNECT is logged, which is the inventory that ticket
@@ -31,6 +32,16 @@ import (
 const (
 	dialTimeout      = 15 * time.Second
 	handshakeTimeout = 30 * time.Second
+
+	// A stalling upstream must not hold an inner request forever. The request
+	// http.ReadRequest hands us carries no context, so context.Background() is the
+	// only deadline it would otherwise have.
+	responseHeaderTimeout = 30 * time.Second
+
+	// Bounded rather than net/http's zero value, which is "keep idle connections
+	// forever": the intercept list is small and fixed, so a pool that never
+	// expires is only somewhere for connections to accumulate.
+	idleConnTimeout = 90 * time.Second
 )
 
 // Server is the https_proxy. One handler, and it serves exactly one method:
@@ -38,19 +49,28 @@ const (
 type Server struct {
 	certs *Certs
 
+	// The shared key the run secret is derived from, and the source-IP to run
+	// lookup it must agree with. A field rather than a *Pods, so a test needs no
+	// apiserver — and so the two identity halves stay swappable independently.
+	key     []byte
+	resolve func(ctx context.Context, ip string) (Run, error)
+	fails   failLimiter
+
 	// dial reaches an upstream. A field so a test can assert *what address the
 	// proxy dialled* — the pin below is a one-line bug otherwise.
 	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	tr   *http.Transport
 }
 
-// New builds the proxy around a certificate. Everything it will later attach a
-// credential to hangs off this — the certificate is what decides which hosts it
-// may terminate at all.
-func New(certs *Certs) *Server {
+// New builds the proxy around a certificate, the shared run key, and a resolver
+// from source IP to run. The certificate decides which hosts it may terminate;
+// the other two decide who may ask it to.
+func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) (Run, error)) *Server {
 	s := &Server{
-		certs: certs,
-		dial:  (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		certs:   certs,
+		key:     key,
+		resolve: resolve,
+		dial:    (&net.Dialer{Timeout: dialTimeout}).DialContext,
 	}
 	s.tr = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -58,13 +78,27 @@ func New(certs *Certs) *Server {
 		},
 		// HTTP/1.1 upstream on purpose: the response is written back to the
 		// client verbatim, and "HTTP/2.0 200" is not a valid HTTP/1.1 status line.
-		ForceAttemptHTTP2: false,
-		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
+		ForceAttemptHTTP2:     false,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		IdleConnTimeout:       idleConnTimeout,
 	}
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// First, and before the hijack: past that point the client has been told
+	// "200 Connection Established" and there is no way left to refuse it.
+	run, code, err := s.authenticate(r)
+	if err != nil {
+		log.Printf("%s %s %s refused: %v", r.RemoteAddr, r.Method, r.Host, err)
+		if code == http.StatusProxyAuthRequired {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="the-implementer"`)
+		}
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
+
 	if r.Method == http.MethodConnect {
 		// r.Host is the CONNECT authority, and from here on it is the only
 		// thing that decides where the bytes go.
@@ -73,6 +107,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "CONNECT needs host:port", http.StatusBadRequest)
 			return
 		}
+		// The run is logged with the destination because that pairing is what
+		// #52 onwards mints against: this run's repository, never the URL's.
+		log.Printf("CONNECT %s for %s", r.Host, run)
 		if s.certs.Intercepts(host) {
 			s.intercept(w, r)
 		} else {
@@ -132,9 +169,16 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request) {
 	defer down.Close()
 	log.Printf("CONNECT %s tunnelled", r.Host)
 
+	// Whichever direction finishes first closes the connection the *other* one is
+	// blocked reading, so a half-close ends the pair instead of parking it: the
+	// goroutine reads down, so it closes up; this side reads up, so it closes down.
+	// Leaving both to the defers above deadlocks on <-done whenever the upstream
+	// hangs up first and the client does not — one goroutine and two file
+	// descriptors, held for as long as the client cares to hold them.
 	done := make(chan struct{})
-	go func() { _, _ = io.Copy(up, down); close(done) }()
+	go func() { _, _ = io.Copy(up, down); up.Close(); close(done) }()
 	_, _ = io.Copy(down, up)
+	down.Close()
 	<-done
 }
 
@@ -188,6 +232,12 @@ func (s *Server) serve(c net.Conn, authority string) {
 		// fields, because URL.Host is the dial target and Host is the header.
 		req.URL.Scheme, req.URL.Host, req.RequestURI = "https", authority, ""
 		req.Host = authority
+		// Ours, and it stops here: the run credential authenticates the caller to
+		// this proxy and has no business travelling upstream. net/http only *sets*
+		// this header for its own proxied requests and never strips one a client
+		// put there itself. Singled out deliberately — the rest of the hop-by-hop
+		// set is either harmless or handled by req.Close/resp.Close below.
+		req.Header.Del("Proxy-Authorization")
 		if port == "443" {
 			req.Host = host // the default port belongs in the dial, not the header
 		}

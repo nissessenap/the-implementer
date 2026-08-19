@@ -12,6 +12,7 @@ spec:
     metadata:
       labels: { app: {{ .Release.Name }} }
     spec:
+      serviceAccountName: {{ .Release.Name }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532 # the nonroot user ko's base image ships
@@ -29,6 +30,15 @@ spec:
             capabilities: { drop: ["ALL"] }
           env:
             - { name: TLS_DIR, value: /tls }
+            # `key` and not a value: the Secret is created out of band, and a
+            # second place to spell its key is a second place to get it wrong.
+            - { name: RUN_KEY_FILE, value: /run/run-key/key }
+            # The one namespace it watches pods in, and the one it serves runs
+            # from. Downward API rather than a value: they are the same namespace
+            # by construction, and a value could say otherwise.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
           ports:
             # 8080 and not a value: the sandbox is handed an `https_proxy` URL
             # naming this port, so a knob here is only a second place to change it.
@@ -42,7 +52,10 @@ spec:
             # proxy re-reads it per handshake, so a renewed certificate needs no
             # restart of this Deployment.
             - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: run-key, mountPath: /run/run-key, readOnly: true }
           resources: {{ toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: tls
           secret: { secretName: {{ .Values.tlsSecretName }} }
+        - name: run-key
+          secret: { secretName: {{ .Values.runKeySecretName }} }

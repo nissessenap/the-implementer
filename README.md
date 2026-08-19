@@ -48,7 +48,9 @@ export KUBECONFIG=…; make e2e       # or any cluster you already have
 RUNTIME_CLASS=gvisor make e2e       # gVisor, where a RuntimeClass exists
 ```
 
-It needs `kubectl`, `helm`, `docker` and Go on `PATH` — Go because the
+It needs `kubectl`, `helm`, `docker`, `openssl` and Go on `PATH` — `openssl`
+because the harness plays the orchestrator and derives each fixture's run
+credential, and Go because the
 proxy image is built with [ko](https://ko.build) (`make image`), which needs
 nothing installed itself. The harness is
 `KUBECONFIG`-driven and assumes nothing else about the cluster's flavour but one
@@ -56,8 +58,9 @@ thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
 else via `E2E_IMAGE_LOAD` (a command taking the image name).
 
-Stages run in filename order, and every stage so far is unauthenticated,
-so the whole thing runs on fork pull requests too. Adding a stage is adding a file
+Stages run in filename order, and no stage so far needs a real credential of any
+kind, so the whole thing runs on fork pull requests too — the run secret the proxy
+authenticates against is derived from a key the harness invents. Adding a stage is adding a file
 to [`e2e/`](e2e/).
 
 ## Roadmap

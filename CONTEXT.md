@@ -39,7 +39,8 @@ The point of the sentinel is that the sandbox's code path is *unchanged*: the
 phase script still builds an authenticated URL, the value is just no longer
 worth stealing.
 
-**Run identity** — `owner`, `repo` and `issue` in **annotations**, not labels,
+**Run identity** — `owner`, `repo`, `issue` and `run-uid` in **annotations**
+(prefixed `implementer.dev/`), not labels,
 because repository names exceed the 63-character label-value cap. Written in **two
 places**: the Job's own metadata and `spec.template.metadata.annotations`, because a
 Pod inherits only the latter. The informer reads them to get back to the issue, and
@@ -48,12 +49,26 @@ the second copy exists and why the proxy needs no RBAC beyond pods. Non-negotiab
 mint for the annotation's repository, never for the one the request URL names.
 
 **Run secret** — a per-run value the orchestrator derives as
-`HMAC-SHA256(shared-key, owner/repo#issue + job-UID)` and injects into the sandbox as
+`HMAC-SHA256(shared-key, owner,repo,issue,run-uid)` and injects into the sandbox as
 userinfo in the `https_proxy` URL, so every client sends it without being configured
-to. The proxy recomputes it rather than being told it, so there is no per-run Secret
+to. The HMAC covers exactly the string that travels as the userinfo *username*, so
+there is one encoding rather than two that can drift, and it uses commas because
+`/`, `#` and `@` would need percent-encoding every client would have to agree on.
+The proxy recomputes it rather than being told it, so there is no per-run Secret
 and no orchestrator→proxy channel. It authenticates the *run*, which is why leaking
 it to the sandbox costs nothing; what it actually guards is **run identity** against
 informer-cache staleness when a pod IP is reused.
+
+**Run UID** — the per-run half of that message: an annotation the orchestrator
+picks, so a re-run of the same issue does not inherit the previous run's
+credential. Not the **Job's** UID, which cannot be written into a sandbox at all —
+[ADR 0005](docs/adr/0005-credentials-terminate-at-the-credential-proxy.md) has why.
+
+**Source address** — the second factor resolves the *connection's* source IP, so
+nothing between the sandbox and the proxy may SNAT. Cluster-internal ClusterIP
+traffic preserves the pod IP; ipvs `masqueradeAll`, or a CNI masquerading
+pod-to-pod, collapses every caller to a node IP and the proxy then refuses every
+run rather than some. A deployment precondition, not a knob.
 
 **Trust bundle** — the system CA bundle concatenated with the proxy's CA,
 assembled by the phase script at run-plan start. A bundle rather than a bare

@@ -1,0 +1,111 @@
+# Stage 40's fixture. Applied by e2e/40-proxy-auth.sh, which substitutes
+# __RUNTIME_CLASS__, the four credentials, and the proxy URL prefix.
+#
+# One pod, because everything under test hangs off *this pod's* IP and
+# annotations: the proxy resolves the source IP to this Pod and requires its
+# annotations to agree with whichever credential the probe presented.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-proxy-auth
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      # The identity the proxy resolves. __GOOD__ is derived from exactly these
+      # four values; __OTHER_RUN__ is a perfectly valid credential for a run that
+      # is not this pod, which is the case the second factor exists to refuse.
+      annotations:
+        implementer.dev/owner: acme
+        implementer.dev/repo: widgets
+        implementer.dev/issue: "5"
+        implementer.dev/run-uid: stage40
+    spec:
+      restartPolicy: Never
+      __RUNTIME_CLASS__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: probe
+          image: curlimages/curl:8.21.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: SSL_CERT_FILE, value: /tmp/trust-bundle.crt }
+            - { name: CURL_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            - { name: URL, value: "https://github.com/" }
+            - { name: GOOD, value: "http://__GOOD__@credential-proxy:8080" }
+            - { name: NO_CRED, value: "http://credential-proxy:8080" }
+            - { name: WRONG_SECRET, value: "http://__WRONG_SECRET__@credential-proxy:8080" }
+            - { name: OTHER_RUN, value: "http://__OTHER_RUN__@credential-proxy:8080" }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/trust-bundle.crt
+
+              # No --retry on any of these: a 407 is an answer, not a transient,
+              # and retrying the negatives would spend the proxy's failure budget.
+              get() { https_proxy=$1 curl -sS -o /dev/null --max-time 20 "$URL" 2>&1; }
+
+              # refused <proxy> <code> — the proxy must refuse *before* the
+              # hijack, which is the whole assertion: after it, the client has
+              # been told "200 Connection Established" and curl would report a
+              # TLS error instead of a status.
+              refused() {
+                out=$(get "$1") && { echo "!!! FAIL: $2 case was allowed through"; exit 1; }
+                case $out in
+                  *"response $2"*) ;;
+                  *) echo "!!! FAIL: expected $2, got: $out"; exit 1 ;;
+                esac
+              }
+
+              get "$GOOD" || { echo "!!! FAIL: the run's own credential was refused"; exit 1; }
+              echo "PROBE own-credential   ok   (secret verified, pod annotations agree)"
+              refused "$NO_CRED"      407
+              echo "PROBE no-credential    407  (anything else in the cluster gets this)"
+              refused "$WRONG_SECRET" 407
+              echo "PROBE wrong-secret     407  (not derivable without the shared key)"
+              refused "$OTHER_RUN"    403
+              echo "PROBE another-run      403  (valid secret, wrong pod — the second factor)"
+        # The ADR 0005 landmine, as a probe rather than a paragraph: git 407s
+        # against an authenticating proxy unless it is told to pre-send Basic, and
+        # that is the only thing in the sandbox this breaks.
+        - name: git
+          image: alpine/git:v2.54.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: GIT_SSL_CAINFO, value: /tmp/git-bundle.crt }
+            - { name: https_proxy, value: "http://__GOOD__@credential-proxy:8080" }
+            # Quoted pairs, because that is the format git parses. Without this,
+            # git waits for the 407 challenge and then reaches for a credential
+            # helper for the proxy URL — which in a sandbox is nothing at all.
+            - { name: GIT_CONFIG_PARAMETERS, value: "'http.proxyAuthMethod=basic'" }
+            - { name: REPO, value: "https://github.com/octocat/Hello-World.git" }
+          volumeMounts:
+            - { name: git-tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/git-bundle.crt
+              git clone --depth 1 -q "$REPO" /tmp/clone \
+                || { echo "!!! FAIL: git could not clone through the authenticating proxy"; exit 1; }
+              echo "PROBE git-clone        ok   (git pre-sent Basic; no credential helper involved)"
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: git-tmp, emptyDir: {} }
+        - name: proxy-ca
+          configMap: { name: proxy-ca }

@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -156,6 +157,12 @@ func TestCertsLoadFails(t *testing.T) {
 	}
 }
 
+// The run every test authenticates as, and the key its secret derives from.
+var (
+	testKey = []byte("shared key")
+	testRun = Run{Owner: "acme", Repo: "widgets", Issue: "5", UID: "run-1"}
+)
+
 // proxyFor stands up the proxy plus a TLS upstream holding the same leaf, and
 // returns the proxy's address along with a pointer to the last address dialled.
 func proxyFor(t *testing.T, sans ...string) (proxyAddr string, dialed *string, gotHost *string, pool *x509.CertPool) {
@@ -174,13 +181,14 @@ func proxyFor(t *testing.T, sans ...string) (proxyAddr string, dialed *string, g
 	host := new(string)
 	up := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*host = r.Host
-		_, _ = io.WriteString(w, "upstream\n")
+		// Echoed, so a test can assert what did *not* arrive.
+		_, _ = io.WriteString(w, "upstream ["+r.Header.Get("Proxy-Authorization")+"]\n")
 	}))
 	up.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}}
 	up.StartTLS()
 	t.Cleanup(up.Close)
 
-	s := New(certs)
+	s := New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil })
 	s.tr.TLSClientConfig.RootCAs = pool
 	addr := new(string)
 	real := (&net.Dialer{}).DialContext
@@ -202,10 +210,14 @@ func connect(t *testing.T, proxyAddr, authority, pipelined string) (net.Conn, *b
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
+	// The credential every client derives from the https_proxy URL's userinfo.
+	user, pass := Cred(testKey, testRun)
+	auth := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 	// pipelined goes out in the same write, unread: a client is entitled to send
 	// its first payload bytes without waiting for the 200, and they must survive
 	// the hijack.
-	if _, err := io.WriteString(c, "CONNECT "+authority+" HTTP/1.1\r\nHost: "+authority+"\r\n\r\n"+pipelined); err != nil {
+	if _, err := io.WriteString(c, "CONNECT "+authority+" HTTP/1.1\r\nHost: "+authority+
+		"\r\nProxy-Authorization: Basic "+auth+"\r\n\r\n"+pipelined); err != nil {
 		t.Fatal(err)
 	}
 	br := bufio.NewReader(c)
@@ -273,7 +285,7 @@ func TestTunnelIsOpaque(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	px := httptest.NewServer(New(certs))
+	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }))
 	defer px.Close()
 
 	// Pipelined, so this also asserts the bytes buffered with the CONNECT are not
@@ -283,5 +295,71 @@ func TestTunnelIsOpaque(t *testing.T) {
 	got, err := br.ReadString('\n')
 	if err != nil || got != "ping\n" {
 		t.Fatalf("tunnel echoed %q, %v", got, err)
+	}
+}
+
+// The run credential authenticates the caller to this proxy and stops here.
+// net/http only *sets* Proxy-Authorization for its own proxied requests; a header
+// the client put on an inner request is forwarded like any other unless we drop
+// it, and upstream is where the interesting credentials live.
+func TestCredentialDoesNotTravelUpstream(t *testing.T) {
+	proxyAddr, _, _, pool := proxyFor(t, "intercepted.test")
+
+	raw, _ := connect(t, proxyAddr, "intercepted.test:443", "")
+	tc := tls.Client(raw, &tls.Config{RootCAs: pool, ServerName: "intercepted.test"})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(tc, "GET /x HTTP/1.1\r\nHost: intercepted.test\r\n"+
+		"Proxy-Authorization: Basic c2VjcmV0\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); got != "upstream []\n" {
+		t.Errorf("upstream saw %q — the credential was forwarded", got)
+	}
+}
+
+// A tunnel ends when either end hangs up. Both halves must, or the one still
+// blocked on a Read holds a goroutine and two file descriptors for as long as the
+// peer that never closes cares to hold them — and any pod may open tunnels.
+func TestTunnelEndsOnUpstreamHalfClose(t *testing.T) {
+	// An upstream that hangs up the moment it is connected to, and a client (us)
+	// that does not: the direction that deadlocks if only the defers close.
+	up, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer up.Close()
+	go func() {
+		if c, err := up.Accept(); err == nil {
+			c.Close()
+		}
+	}()
+
+	dir := t.TempDir()
+	issue(t, dir, "intercepted.test")
+	certs, err := LoadCerts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }))
+	defer px.Close()
+
+	raw, br := connect(t, strings.TrimPrefix(px.URL, "http://"), up.Addr().String(), "")
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// EOF or a reset, either is the tunnel ending. A timeout is the bug.
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("the tunnel is still open after the upstream hung up")
+	} else if os.IsTimeout(err) {
+		t.Errorf("the client was never released: %v", err)
 	}
 }
