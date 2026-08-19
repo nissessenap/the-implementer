@@ -16,6 +16,9 @@ JOB="proto-issue-${ISSUE}${JOB_SUFFIX:-}"
 # ROOT=1 runs as uid 0 — the gVisor posture, where the sandbox is the boundary
 #   rather than the UID. Root inside a gVisor sandbox is not root on the host.
 # RUNTIME=<class>|none picks the RuntimeClass explicitly instead of autodetecting.
+# TOOLCHAIN=go|node|python stands in for ADR 0003's pre-pod detection; issue #31's
+#   phase 2 interpolates it into the language sub-agent's brief. Unset = no
+#   language reviewer, which is the documented fallback.
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-}
 SECCOMP=${SECCOMP:-}
 ROOT=${ROOT:-}
@@ -146,6 +149,7 @@ sed -e "s|__JOB__|$JOB|" -e "s|__IMG__|$IMG|" -e "s|__REPO__|$REPO|" \
     -e "s|__ISSUE__|$ISSUE|" -e "s|__RUNTIME_CLASS__|$RUNTIME_CLASS|" \
     -e "s|__POD_SECURITY__|$POD_SECURITY|" -e "s|__PREFLIGHT_ONLY__|$PREFLIGHT_ONLY|" \
     -e "s|__BRANCH_SUFFIX__|${BRANCH_SUFFIX:-}|" \
+    -e "s|__TOOLCHAIN__|${TOOLCHAIN:-}|" \
     "$DIR/job.yaml" | kubectl apply -f - >/dev/null
 
 echo "==> waiting for pod"

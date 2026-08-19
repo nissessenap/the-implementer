@@ -34,6 +34,11 @@ spec:
               value: "__PREFLIGHT_ONLY__"
             - name: BRANCH_SUFFIX
               value: "__BRANCH_SUFFIX__"
+            # ADR 0003 detects the toolchain before the pod starts and it arrives
+            # here alongside REPO/ISSUE. Phase 2's language sub-agent interpolates
+            # it; unset means /code-review runs with its own two axes only (#12).
+            - name: TOOLCHAIN
+              value: "__TOOLCHAIN__"
             # The agent CLI refuses --dangerously-skip-permissions as uid 0. The
             # gate (read out of the 2.1.220 binary) is:
             #   getuid()===0 && IS_SANDBOX!=="1" && !CLAUDE_CODE_BUBBLEWRAP
