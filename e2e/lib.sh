@@ -41,6 +41,14 @@ run_cred() {
     "$(printf '%s' "$user" | openssl dgst -sha256 -hmac "$RUN_KEY" -r | cut -d' ' -f1)"
 }
 
+# The worthless string the sandbox holds where the GitHub credential would be, and
+# the one the proxy matches on. Padded to 40 bytes, the length of every GitHub
+# token, so the swap never changes a request's length. proxy.Sentinel is the same
+# constant on the Go side; TestSentinelIsTokenLength pins the length there and the
+# check below pins it here, which is all that ties the two copies together.
+SENTINEL='proxy-injected--------------------------'
+[[ ${#SENTINEL} -eq 40 ]] || { echo "SENTINEL is ${#SENTINEL} bytes, not 40" >&2; exit 1; }
+
 # Empty in CI, `gvisor` against a local k3s. Substituted away entirely rather than
 # left empty: runtimeClassName is a *string, and "" is not a DNS subdomain.
 runtime_class_line() {

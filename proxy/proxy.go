@@ -8,10 +8,10 @@
 // the plan if it works out. Shared types are worth less than the seam.
 //
 // What is here so far: an https_proxy that authenticates the run calling it,
-// resolves that run's identity from Kubernetes, and terminates TLS for the hosts
-// its own certificate names while tunnelling everything else opaquely. The
-// credentials it exists to attach land on top of it — the sentinel swap (#52),
-// GAR (#54) and Vertex (#55).
+// resolves that run's identity from Kubernetes, terminates TLS for the hosts its
+// own certificate names while tunnelling everything else opaquely, and swaps the
+// sentinel for the real credential on the hosts a credential is bound to. GAR
+// (#54) and Vertex (#55) land as further entries in that same per-host switch.
 //
 // Egress is unrestricted on purpose: the allowlist and the NetworkPolicy are
 // post-MVP with #16. Every CONNECT is logged, which is the inventory that ticket
@@ -49,6 +49,10 @@ const (
 type Server struct {
 	certs *Certs
 
+	// credFor: which credential, if any, an intercepted host is due. Nil is a
+	// proxy that holds none, which is every test that is not about credentials.
+	creds Creds
+
 	// The shared key the run secret is derived from, and the source-IP to run
 	// lookup it must agree with. A field rather than a *Pods, so a test needs no
 	// apiserver — and so the two identity halves stay swappable independently.
@@ -62,12 +66,14 @@ type Server struct {
 	tr   *http.Transport
 }
 
-// New builds the proxy around a certificate, the shared run key, and a resolver
-// from source IP to run. The certificate decides which hosts it may terminate;
-// the other two decide who may ask it to.
-func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) (Run, error)) *Server {
+// New builds the proxy around a certificate, the shared run key, a resolver from
+// source IP to run, and the credentials it attaches. The certificate decides which
+// hosts it may terminate, the key and resolver decide who may ask it to, and creds
+// decides what each intercepted host is handed.
+func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) (Run, error), creds Creds) *Server {
 	s := &Server{
 		certs:   certs,
+		creds:   creds,
 		key:     key,
 		resolve: resolve,
 		dial:    (&net.Dialer{Timeout: dialTimeout}).DialContext,
@@ -240,6 +246,25 @@ func (s *Server) serve(c net.Conn, authority string) {
 		req.Header.Del("Proxy-Authorization")
 		if port == "443" {
 			req.Host = host // the default port belongs in the dial, not the header
+		}
+
+		// The swap, and it hangs off `host` — the CONNECT authority pinned above,
+		// never the inner request — so the credential a host is due cannot be
+		// claimed by naming that host in a header.
+		if cred := s.creds.For(host); cred != nil {
+			switch swapped, err := cred.swap(req.Context(), req, host); {
+			case err != nil:
+				// Refused rather than forwarded: a request that goes on without
+				// its credential sends the sentinel to GitHub, which is both a
+				// leak and an anonymous request that looks like a rate limit.
+				log.Printf("%s: credential %q unavailable: %v", authority, cred.Name, err)
+				// Hand-written: the connection is past net/http's reach, so a
+				// status line is all that is left to refuse a request with.
+				_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+				return
+			case swapped:
+				log.Printf("%s: swapped the sentinel for the %q credential", host, cred.Name)
+			}
 		}
 
 		start := time.Now()

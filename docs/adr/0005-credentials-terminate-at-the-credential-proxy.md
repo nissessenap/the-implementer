@@ -91,6 +91,15 @@ The sandbox's `GH_TOKEN` is the literal string `proxy-injected`. The proxy
 terminates TLS for `github.com` with a cert-manager leaf and substitutes a real
 installation token in flight.
 
+> **Amended 2026-08-19, on the sentinel's spelling**, by #52 building the swap.
+> The string is **padded to a token's 40 bytes** — `proxy-injected` plus 26
+> dashes, `proxy.Sentinel` — and the swap matches on the **prefix**, not the
+> whole, so a sandbox holding the unpadded string still swaps rather than pushing
+> anonymously. The padding buys nothing today (only a header is rewritten, and
+> `Content-Length` counts a body); it is there so a later credential-in-a-body
+> swap cannot shift framing. The bare `proxy-injected` above and in the diagram
+> is that prefix. `CONTEXT.md` carries the current definition.
+
 **Why intercept at all, rather than redirect.** Stated because it was missing, and
 its absence made this section look like an unexamined premise. `git`'s
 `url.<proxy>.insteadOf` plus `GH_HOST` achieves the same sentinel swap with no

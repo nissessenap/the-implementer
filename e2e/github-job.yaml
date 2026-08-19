@@ -1,0 +1,111 @@
+# Stage 50's fixture. Applied by e2e/50-github-swap.sh, which substitutes
+# __RUNTIME_CLASS__, __RUN_CRED__, __SENTINEL__ and __REPO__.
+#
+# The point of the manifest is what is *not* in it: no GitHub token, anywhere. The
+# only credential here is the run secret, which authenticates this pod to the proxy
+# and is worth nothing outside the cluster.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-github
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      # __RUN_CRED__ is derived from exactly these four values; the proxy resolves
+      # this pod's IP back to them and refuses the request unless they agree.
+      annotations:
+        implementer.dev/owner: acme
+        implementer.dev/repo: widgets
+        implementer.dev/issue: "5"
+        implementer.dev/run-uid: stage50
+    spec:
+      restartPolicy: Never
+      __RUNTIME_CLASS__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        # `gh`'s shape: Authorization: token SENTINEL, against the REST API. The
+        # rate limit is the assertion — 60/h anonymous, 5000/h authenticated, and
+        # this pod holds nothing that could reach 5000.
+        - name: api
+          image: curlimages/curl:8.21.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: SSL_CERT_FILE, value: /tmp/trust-bundle.crt }
+            - { name: CURL_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            - { name: https_proxy, value: "http://__RUN_CRED__@credential-proxy:8080" }
+            - { name: GH_TOKEN, value: "__SENTINEL__" }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/trust-bundle.crt
+              limit() { curl -sS --max-time 20 "$@" https://api.github.com/rate_limit \
+                | tr -d ' \n' | sed -n 's/.*"core":{"limit":\([0-9]*\).*/\1/p'; }
+
+              # The control, and it is not decoration: without it a 5000 could mean
+              # the probe reached GitHub with some credential of its own.
+              anon=$(limit)
+              [ "$anon" = 60 ] || { echo "!!! FAIL: anonymous limit is '$anon', want 60"; exit 1; }
+              echo "PROBE anonymous        60   (no credential presented, none attached)"
+
+              swapped=$(limit -H "Authorization: token $GH_TOKEN")
+              [ "$swapped" = 5000 ] || { echo "!!! FAIL: sentinel limit is '$swapped', want 5000"; exit 1; }
+              echo "PROBE token-sentinel   5000 (gh's shape; unreachable without the swap)"
+
+        # git's shape: Basic base64(x-access-token:SENTINEL), from the clone URL's
+        # userinfo. This is the one the field demonstrably gets wrong — OpenAI's
+        # codex and Anthropic's sandbox-runtime both no-op on it silently.
+        - name: git
+          image: alpine/git:v2.54.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: GIT_SSL_CAINFO, value: /tmp/git-bundle.crt }
+            - { name: https_proxy, value: "http://__RUN_CRED__@credential-proxy:8080" }
+            # Pre-send Basic to the *proxy*; without it git waits for the 407 and
+            # then reaches for a credential helper that a sandbox does not have.
+            # Unrelated to the upstream credential the swap replaces.
+            - { name: GIT_CONFIG_PARAMETERS, value: "'http.proxyAuthMethod=basic'" }
+            - { name: REPO, value: "__REPO__" }
+            - { name: SENTINEL, value: "__SENTINEL__" }
+          volumeMounts:
+            - { name: git-tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/git-bundle.crt
+
+              # The authenticated URL the phase script builds, sentinel and all —
+              # the sandbox's code path is unchanged, the value is just worthless.
+              git clone --depth 1 -q "https://x-access-token:$SENTINEL@github.com/$REPO.git" /tmp/clone \
+                || { echo "!!! FAIL: clone through the swap failed"; exit 1; }
+              echo "PROBE git-clone        ok   (Basic base64(x-access-token:SENTINEL) swapped)"
+
+              # A dry run still does the ref discovery and the authentication, which
+              # is the whole of what is under test; it just sends no update. A clone
+              # of a public repo never authenticates, so this is the assertion that
+              # the write path works.
+              cd /tmp/clone
+              git push --dry-run origin HEAD:refs/heads/implementer-e2e-probe \
+                || { echo "!!! FAIL: push-dry-run through the swap failed"; exit 1; }
+              echo "PROBE git-push-dry-run ok   (git-receive-pack authenticated)"
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: git-tmp, emptyDir: {} }
+        - name: proxy-ca
+          configMap: { name: proxy-ca }

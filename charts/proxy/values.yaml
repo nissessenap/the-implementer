@@ -17,6 +17,13 @@ tlsSecretName: proxy-leaf-tls
 # Its key is `key`, fixed in the Deployment.
 runKeySecretName: proxy-run-key
 
+# The Secret holding the GitHub token the proxy swaps the sentinel for. Empty is
+# a working proxy that holds no credential — it still intercepts, it just hands
+# nothing out. #53 replaces this with a token the proxy mints per run; the static
+# path stays as the seam that keeps the swap testable with no App and no signer.
+# Its key is `token`, fixed in the Deployment.
+githubTokenSecretName: ""
+
 resources:
   requests: { cpu: 100m, memory: 64Mi }
   limits: { memory: 256Mi }

@@ -39,6 +39,12 @@ spec:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef: { fieldPath: metadata.namespace }
+            {{- if .Values.githubTokenSecretName }}
+            # Set only when there is a Secret to read: absent, the proxy binds no
+            # credential to any host and every request comes out as the sandbox
+            # sent it. `token` and not a value, as with the run key above.
+            - { name: GITHUB_TOKEN_FILE, value: /run/github/token }
+            {{- end }}
           ports:
             # 8080 and not a value: the sandbox is handed an `https_proxy` URL
             # naming this port, so a knob here is only a second place to change it.
@@ -53,9 +59,16 @@ spec:
             # restart of this Deployment.
             - { name: tls, mountPath: /tls, readOnly: true }
             - { name: run-key, mountPath: /run/run-key, readOnly: true }
+            {{- if .Values.githubTokenSecretName }}
+            - { name: github-token, mountPath: /run/github, readOnly: true }
+            {{- end }}
           resources: {{ toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: tls
           secret: { secretName: {{ .Values.tlsSecretName }} }
         - name: run-key
           secret: { secretName: {{ .Values.runKeySecretName }} }
+        {{- if .Values.githubTokenSecretName }}
+        - name: github-token
+          secret: { secretName: {{ .Values.githubTokenSecretName }} }
+        {{- end }}
