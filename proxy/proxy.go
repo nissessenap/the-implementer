@@ -114,10 +114,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The run is logged with the destination because that pairing is what
-		// #52 onwards mints against: this run's repository, never the URL's.
+		// the credential mints against: this run's repository, never the URL's.
 		log.Printf("CONNECT %s for %s", r.Host, run)
 		if s.certs.Intercepts(host) {
-			s.intercept(w, r)
+			s.intercept(w, r, run)
 		} else {
 			s.tunnel(w, r)
 		}
@@ -191,7 +191,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request) {
 // intercept terminates TLS with our own certificate for the name the client asked
 // for. The client only gets here because it trusts our CA (the trust bundle); one
 // that does not fails the handshake, by name, in a single log line.
-func (s *Server) intercept(w http.ResponseWriter, r *http.Request) {
+func (s *Server) intercept(w http.ResponseWriter, r *http.Request, run Run) {
 	authority := r.Host
 	down, ok := hijack(w)
 	if !ok {
@@ -211,14 +211,14 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tc.SetDeadline(time.Time{})
 	log.Printf("CONNECT %s intercepted", authority)
-	s.serve(tc, authority)
+	s.serve(tc, authority, run)
 }
 
 // serve is a hand-rolled HTTP/1.1 loop rather than httputil.ReverseProxy because
 // the connection is already hijacked: there is no Listener to hand to a Server,
 // and the one-connection-Listener adapters all leak either a goroutine or the
 // connection. Keep-alive framing still comes from net/http.
-func (s *Server) serve(c net.Conn, authority string) {
+func (s *Server) serve(c net.Conn, authority string, run Run) {
 	defer c.Close()
 	host, port, _ := net.SplitHostPort(authority)
 	br := bufio.NewReader(c)
@@ -252,7 +252,10 @@ func (s *Server) serve(c net.Conn, authority string) {
 		// never the inner request — so the credential a host is due cannot be
 		// claimed by naming that host in a header.
 		if cred := s.creds.For(host); cred != nil {
-			switch swapped, err := cred.swap(req.Context(), req, host); {
+			// `run` is the authenticated caller from ServeHTTP, and it is what
+			// the credential mints against: this run's repository, never the one
+			// the URL — or the pinned authority — names.
+			switch swapped, err := cred.swap(req.Context(), req, host, run); {
 			case err != nil:
 				// Refused rather than forwarded: a request that goes on without
 				// its credential sends the sentinel to GitHub, which is both a

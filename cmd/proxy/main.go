@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -46,11 +47,43 @@ func main() {
 	// Optional, and the only credential this proxy holds today. Absent, it is
 	// still a working interception proxy — every host comes out tokenless, which
 	// is what e2e stages 30 and 40 exercise.
+	//
+	// Two ways to hold it, and refusing both at once is the point: they are not
+	// equivalent — one is scoped to the calling run's repository and the other is
+	// scoped to whatever the operator put in the Secret — so "which one won" must
+	// never be something to work out from a log.
+	appID, tokenFile := os.Getenv("GITHUB_APP_ID"), os.Getenv("GITHUB_TOKEN_FILE")
+	if appID != "" && tokenFile != "" {
+		log.Fatal("GITHUB_APP_ID and GITHUB_TOKEN_FILE are both set: the minted and static credentials are not interchangeable, pick one")
+	}
 	var creds []*proxy.Credential
-	if f := os.Getenv("GITHUB_TOKEN_FILE"); f != "" {
-		gh, err := proxy.StaticGitHub(f)
+	switch {
+	case appID != "":
+		id, err := strconv.ParseInt(appID, 10, 64)
 		if err != nil {
-			log.Fatalf("GITHUB_TOKEN_FILE=%s: %v", f, err)
+			log.Fatalf("GITHUB_APP_ID=%s: %v", appID, err)
+		}
+		// Boot-time, and blocking: NewGHAIT with WithValidateKey reaches the KMS,
+		// so a key that is disabled or the wrong algorithm fails here rather than
+		// on the first run that needed a token.
+		gh, err := proxy.MintedGitHub(context.Background(), proxy.GitHubApp{
+			AppID: id,
+			// The provider must also have been *linked in* by build tag; naming
+			// one that was not is a boot failure, by name. Blanket underscore
+			// imports are deliberately not used: ghait's provider registry is a
+			// global map with no identity check, so anything in the binary can
+			// shadow a provider.
+			Provider: os.Getenv("GITHUB_APP_PROVIDER"),
+			Key:      os.Getenv("GITHUB_APP_KEY"),
+		})
+		if err != nil {
+			log.Fatalf("GitHub App: %v", err)
+		}
+		creds = append(creds, gh)
+	case tokenFile != "":
+		gh, err := proxy.StaticGitHub(tokenFile)
+		if err != nil {
+			log.Fatalf("GITHUB_TOKEN_FILE=%s: %v", tokenFile, err)
 		}
 		creds = append(creds, gh)
 	}

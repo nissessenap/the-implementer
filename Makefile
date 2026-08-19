@@ -11,6 +11,10 @@ kind-up:
 
 test:
 	go test ./...
+	# The shipped binary is a *different* build: production links the GCP signer
+	# and drops the PEM one, so `go test`'s tag set never compiles it. Nothing
+	# else here would catch a break in that half until release.
+	go build -tags $(GO_TAGS) -o /dev/null ./cmd/proxy
 
 # ko rather than a Dockerfile: no base image to keep patched, no build stage to
 # get wrong, and no build context to .dockerignore. The tag it prints is a hash
@@ -24,6 +28,18 @@ KO ?= go run github.com/google/ko@v0.18.0
 KO_DOCKER_REPO ?= ko.local/implementer-proxy
 export KO_DOCKER_REPO
 
+# Which key provider is linked into the binary. A build tag and never a blanket
+# underscore import: ghait's provider registry is a global map with no identity
+# check, so anything linked in can shadow a provider — the smaller the set in the
+# binary, the smaller that surface. `ghait.no_file` drops the PEM-on-disk signer
+# that ghait registers by default, which production must not have.
+#
+# The e2e signs with a local PEM and so builds `GO_TAGS=` — the default set, which
+# is the file provider alone.
+GO_TAGS ?= ghait.gcp,ghait.no_file
+
 # Prints the image reference on stdout and nothing else. e2e/30-proxy.sh reads it.
+# GOFLAGS rather than ko's own `flags:`, because ko shells out to `go build` and
+# so `go test`, `go vet` and this target can all be handed the same tag set.
 image:
-	@$(KO) build --bare ./cmd/proxy
+	@GOFLAGS="-tags=$(GO_TAGS)" $(KO) build --bare ./cmd/proxy

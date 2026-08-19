@@ -54,6 +54,36 @@ matching is case-insensitive at both ends, because x509's is: a host the
 certificate intercepts under one casing and the switch misses under another is
 an anonymous request with no error.
 
+**Minted installation token** — what the GitHub credential actually is: an
+installation token the proxy mints per run, scoped by
+`InstallationTokenOptions.Repositories` to **the repository the run's annotations
+name**, in the installation that repository resolves to. Two lookups off the same
+`Run`, and never off the request: the URL, the `Host` header and the CONNECT
+authority are all things the sandbox controls, and a token scoped to any of them
+reaches every repository the App is installed on. Cached per run — keyed by the
+whole identity, `run-uid` included, so a re-run does not inherit the previous
+run's credential — and re-minted five minutes before expiry, so a clone starting
+at minute 59 does not die mid-transfer. Signing is per-mint and not cached:
+GitHub caps a GitHub App JWT's `exp` at ten minutes.
+
+**Static token** (`StaticGitHub`) — the other half of the same credential slot: a
+token read from a mounted Secret, scoped to whatever the operator put there. Not
+a fallback and not a default — it is the seam that keeps the swap itself testable
+with no App, no signer and no KMS. Never both at once: the two are not
+interchangeable, so the chart refuses to render and the proxy refuses to boot
+rather than pick a winner.
+
+**Signing seam** — [`isometry/ghait`](https://github.com/isometry/ghait) behind
+`ghinstallation.Signer`: the App's private key is a *reference* (a KMS crypto key
+version) rather than bytes the proxy holds. The key is an **import** — GitHub
+generates the App key pair and has no bring-your-own-public-key — and the proxy
+always asks for ghait's boot-time `Check()`, which is what pins the key to ENABLED
+and `RSA_SIGN_PKCS1_2048_SHA256` rather than discovering it on the first run.
+Providers are linked in by **build tag** (`make image GO_TAGS=…`), never by a
+blanket underscore import: ghait's provider registry is a global map with no
+identity check, so anything in the binary can shadow a provider. `file` for the
+e2e, `gcp` for production, and production drops `file` outright.
+
 **Run identity** — `owner`, `repo`, `issue` and `run-uid` in **annotations**
 (prefixed `implementer.dev/`), not labels,
 because repository names exceed the 63-character label-value cap. Written in **two
