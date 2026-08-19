@@ -68,6 +68,12 @@ put a real Job UID into the sandbox's environment. A value the creator picks has
 the freshness the UID was chosen for — a re-run of the same issue does not inherit
 the previous run's credential — and can actually be written.
 
+**Source address** — the second factor resolves the *connection's* source IP, so
+nothing between the sandbox and the proxy may SNAT. Cluster-internal ClusterIP
+traffic preserves the pod IP; ipvs `masqueradeAll`, or a CNI masquerading
+pod-to-pod, collapses every caller to a node IP and the proxy then refuses every
+run rather than some. A deployment precondition, not a knob.
+
 **Trust bundle** — the system CA bundle concatenated with the proxy's CA,
 assembled by the phase script at run-plan start. A bundle rather than a bare
 `ca.crt` because six of the seven trust variables *replace* the trust store

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -64,6 +65,25 @@ func main() {
 
 	// :8080 and not a knob: the sandbox is handed an `https_proxy` URL naming
 	// this port, so a second place to change it is a second place to get it wrong.
-	log.Printf("listening on :8080, resolving runs in namespace %s", ns)
-	log.Fatal(http.ListenAndServe(":8080", proxy.New(certs, key, pods.Run)))
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: proxy.New(certs, key, pods.Run),
+
+		// The two timeouts a CONNECT proxy can actually set. Every pod in the
+		// cluster can reach this port — there is no NetworkPolicy in MVP — and
+		// without ReadHeaderTimeout a caller that trickles its request line one
+		// byte at a time holds a goroutine indefinitely, before the handler, and so
+		// before it has authenticated as anything.
+		//
+		// Not ReadTimeout and not WriteTimeout, which is the tempting completion of
+		// the set and would break every tunnel: their deadlines are set on the
+		// connection and survive the hijack, so they would cut a CONNECT off
+		// mid-transfer. These two are safe — net/http clears the read deadline once
+		// the headers are parsed, and IdleTimeout only governs the gap between
+		// keep-alive requests, which a hijacked connection no longer has.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Printf("listening on %s, resolving runs in namespace %s", srv.Addr, ns)
+	log.Fatal(srv.ListenAndServe())
 }

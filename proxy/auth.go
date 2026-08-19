@@ -42,14 +42,20 @@ func (s *Server) authenticate(r *http.Request) (Run, int, error) {
 		return Run{}, code, err
 	}
 
-	// No credential at all spends no token, deliberately: a client that has one
-	// and did not pre-send it takes the 407 as a challenge and retries, and
-	// charging for that would rate-limit the ordinary path. What is worth
-	// limiting is *guessing*, which means a credential that was presented and
-	// did not hold up.
-	user, pass, ok := proxyBasicAuth(r.Header.Get("Proxy-Authorization"))
+	// An absent header spends no token, deliberately: a client that has a
+	// credential and did not pre-send it takes the 407 as a challenge and retries,
+	// and charging for that would rate-limit the ordinary path. Nothing else is
+	// free — what is worth limiting is *guessing*, which means anything that was
+	// presented and did not hold up.
+	h := r.Header.Get("Proxy-Authorization")
+	if h == "" {
+		return Run{}, http.StatusProxyAuthRequired, errors.New("no Proxy-Authorization")
+	}
+	user, pass, ok := proxyBasicAuth(h)
 	if !ok {
-		return Run{}, http.StatusProxyAuthRequired, errors.New("no Proxy-Authorization: Basic")
+		// Present but unparseable: nobody reaches this by *not* having pre-sent a
+		// credential, so it is not the challenge path and costs a token.
+		return fail(http.StatusProxyAuthRequired, errors.New("Proxy-Authorization is not parseable Basic"))
 	}
 	claim, ok := parseRun(user)
 	if !ok {
@@ -61,6 +67,19 @@ func (s *Server) authenticate(r *http.Request) (Run, int, error) {
 		return fail(http.StatusProxyAuthRequired, fmt.Errorf("wrong secret for %q", claim))
 	}
 
+	// The failure limiter shapes *rate*, and only after the fact: a token is spent
+	// when a request has already failed, so nothing stops N callers entering the
+	// resolve wait together on one token's worth of budget. A slot bounds the
+	// standing cost of that wait instead. Refused without spending a token — a
+	// full resolver is our problem, not evidence about this caller.
+	select {
+	case s.sem <- struct{}{}:
+	default:
+		return Run{}, http.StatusTooManyRequests, errors.New("resolver is full")
+	}
+	// Deferred rather than released on the next line: a resolver that panics must
+	// not retire a slot permanently, and everything after it is a struct compare.
+	defer func() { <-s.sem }()
 	got, err := s.resolve(r.Context(), ip)
 	if err != nil {
 		return fail(http.StatusForbidden, err)
@@ -88,6 +107,13 @@ func proxyBasicAuth(h string) (user, pass string, ok bool) {
 	user, pass, ok = strings.Cut(string(raw), ":")
 	return user, pass, ok
 }
+
+// How many callers may be inside the resolver at once. It is the wait in Pods.Run
+// that this bounds, not the index lookup, which is a map read.
+//
+// ponytail: a flat cap, not per-IP. One namespace of runs is nowhere near it;
+// make it per-IP if one noisy run ever starves the others.
+const resolving = 64
 
 // failLimiter rate-limits authentication failures per source address. Keyed by IP
 // so one misconfigured pod cannot lock the others out.

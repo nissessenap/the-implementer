@@ -50,7 +50,7 @@ func WatchPods(ctx context.Context, c kubernetes.Interface, ns string) (*Pods, e
 	inf := f.Core().V1().Pods().Informer()
 	if err := inf.AddIndexers(cache.Indexers{byPodIP: func(o any) ([]string, error) {
 		p, ok := o.(*corev1.Pod)
-		if !ok || p.Status.PodIP == "" {
+		if !ok || p.Status.PodIP == "" || terminated(p) {
 			return nil, nil
 		}
 		return []string{p.Status.PodIP}, nil
@@ -69,6 +69,22 @@ func WatchPods(ctx context.Context, c kubernetes.Interface, ns string) (*Pods, e
 		}
 	}
 	return &Pods{idx: inf.GetIndexer(), wait: resolveWait}, nil
+}
+
+// terminated is "this pod no longer holds its IP". The CNI releases the address
+// when the sandbox is torn down, but the Pod object keeps status.podIP until it is
+// deleted — and finished run pods are retained on purpose (proto/job.yaml keeps
+// them a day, so pods/log stays readable). Without this a recycled IP indexes two
+// pods, p.pod refuses the ambiguity, and the *new* run is locked out for as long
+// as the old one is kept.
+//
+// Phase, and only the terminal ones. Not DeletionTimestamp: that is set when
+// graceful termination *begins*, while the containers still run and the run is
+// still entitled to its egress. Not Pending either — the kubelet publishes podIP
+// once the sandbox network is up, before any container starts, which is exactly
+// the race resolveWait waits out.
+func terminated(p *corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
 }
 
 // Run reads run identity off the pod holding ip. A pod that is not a run — any

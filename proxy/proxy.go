@@ -32,6 +32,16 @@ import (
 const (
 	dialTimeout      = 15 * time.Second
 	handshakeTimeout = 30 * time.Second
+
+	// A stalling upstream must not hold an inner request forever. The request
+	// http.ReadRequest hands us carries no context, so context.Background() is the
+	// only deadline it would otherwise have.
+	responseHeaderTimeout = 30 * time.Second
+
+	// Bounded rather than net/http's zero value, which is "keep idle connections
+	// forever": the intercept list is small and fixed, so a pool that never
+	// expires is only somewhere for connections to accumulate.
+	idleConnTimeout = 90 * time.Second
 )
 
 // Server is the https_proxy. One handler, and it serves exactly one method:
@@ -45,6 +55,7 @@ type Server struct {
 	key     []byte
 	resolve func(ctx context.Context, ip string) (Run, error)
 	fails   failLimiter
+	sem     chan struct{}
 
 	// dial reaches an upstream. A field so a test can assert *what address the
 	// proxy dialled* — the pin below is a one-line bug otherwise.
@@ -60,6 +71,7 @@ func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) 
 		certs:   certs,
 		key:     key,
 		resolve: resolve,
+		sem:     make(chan struct{}, resolving),
 		dial:    (&net.Dialer{Timeout: dialTimeout}).DialContext,
 	}
 	s.tr = &http.Transport{
@@ -68,8 +80,10 @@ func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) 
 		},
 		// HTTP/1.1 upstream on purpose: the response is written back to the
 		// client verbatim, and "HTTP/2.0 200" is not a valid HTTP/1.1 status line.
-		ForceAttemptHTTP2: false,
-		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
+		ForceAttemptHTTP2:     false,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		IdleConnTimeout:       idleConnTimeout,
 	}
 	return s
 }
@@ -157,9 +171,16 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request) {
 	defer down.Close()
 	log.Printf("CONNECT %s tunnelled", r.Host)
 
+	// Whichever direction finishes first closes the connection the *other* one is
+	// blocked reading, so a half-close ends the pair instead of parking it: the
+	// goroutine reads down, so it closes up; this side reads up, so it closes down.
+	// Leaving both to the defers above deadlocks on <-done whenever the upstream
+	// hangs up first and the client does not — one goroutine and two file
+	// descriptors, held for as long as the client cares to hold them.
 	done := make(chan struct{})
-	go func() { _, _ = io.Copy(up, down); close(done) }()
+	go func() { _, _ = io.Copy(up, down); up.Close(); close(done) }()
 	_, _ = io.Copy(down, up)
+	down.Close()
 	<-done
 }
 
@@ -213,6 +234,12 @@ func (s *Server) serve(c net.Conn, authority string) {
 		// fields, because URL.Host is the dial target and Host is the header.
 		req.URL.Scheme, req.URL.Host, req.RequestURI = "https", authority, ""
 		req.Host = authority
+		// Ours, and it stops here: the run credential authenticates the caller to
+		// this proxy and has no business travelling upstream. net/http only *sets*
+		// this header for its own proxied requests and never strips one a client
+		// put there itself. Singled out deliberately — the rest of the hop-by-hop
+		// set is either harmless or handled by req.Close/resp.Close below.
+		req.Header.Del("Proxy-Authorization")
 		if port == "443" {
 			req.Host = host // the default port belongs in the dial, not the header
 		}
