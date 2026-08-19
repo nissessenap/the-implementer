@@ -4,3 +4,6 @@
 
 # `make kind-up` writes its own kubeconfig rather than touching ~/.kube/config.
 .kind.kubeconfig
+
+*.private-key.pem
+.env
