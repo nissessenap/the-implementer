@@ -14,8 +14,8 @@ tlsSecretName: proxy-leaf-tls
 # orchestrator computes HMAC-SHA256(key, run) when it builds the Job and the proxy
 # recomputes it here, so nothing is handed over between them. Created out of band
 # like tlsSecretName above — this chart reads both Secrets and owns neither.
+# Its key is `key`, fixed in the Deployment.
 runKeySecretName: proxy-run-key
-runKeySecretKey: key
 
 resources:
   requests: { cpu: 100m, memory: 64Mi }

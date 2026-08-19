@@ -30,7 +30,9 @@ spec:
             capabilities: { drop: ["ALL"] }
           env:
             - { name: TLS_DIR, value: /tls }
-            - { name: RUN_KEY_FILE, value: /run/run-key/{{ .Values.runKeySecretKey }} }
+            # `key` and not a value: the Secret is created out of band, and a
+            # second place to spell its key is a second place to get it wrong.
+            - { name: RUN_KEY_FILE, value: /run/run-key/key }
             # The one namespace it watches pods in, and the one it serves runs
             # from. Downward API rather than a value: they are the same namespace
             # by construction, and a value could say otherwise.

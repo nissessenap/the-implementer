@@ -59,14 +59,10 @@ and no orchestrator→proxy channel. It authenticates the *run*, which is why le
 it to the sandbox costs nothing; what it actually guards is **run identity** against
 informer-cache staleness when a pod IP is reused.
 
-**Run UID** — the per-run half of that message, and an annotation the orchestrator
-writes rather than the **Job's** UID
-[ADR 0005](docs/adr/0005-credentials-terminate-at-the-credential-proxy.md)
-names. The Job's UID cannot be used: the apiserver assigns it at create time,
-`spec.template` is immutable afterwards, and the sandbox cannot derive the secret itself, so nothing can ever
-put a real Job UID into the sandbox's environment. A value the creator picks has
-the freshness the UID was chosen for — a re-run of the same issue does not inherit
-the previous run's credential — and can actually be written.
+**Run UID** — the per-run half of that message: an annotation the orchestrator
+picks, so a re-run of the same issue does not inherit the previous run's
+credential. Not the **Job's** UID, which cannot be written into a sandbox at all —
+[ADR 0005](docs/adr/0005-credentials-terminate-at-the-credential-proxy.md) has why.
 
 **Source address** — the second factor resolves the *connection's* source IP, so
 nothing between the sandbox and the proxy may SNAT. Cluster-internal ClusterIP

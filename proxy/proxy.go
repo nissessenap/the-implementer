@@ -55,7 +55,6 @@ type Server struct {
 	key     []byte
 	resolve func(ctx context.Context, ip string) (Run, error)
 	fails   failLimiter
-	sem     chan struct{}
 
 	// dial reaches an upstream. A field so a test can assert *what address the
 	// proxy dialled* — the pin below is a one-line bug otherwise.
@@ -71,7 +70,6 @@ func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) 
 		certs:   certs,
 		key:     key,
 		resolve: resolve,
-		sem:     make(chan struct{}, resolving),
 		dial:    (&net.Dialer{Timeout: dialTimeout}).DialContext,
 	}
 	s.tr = &http.Transport{

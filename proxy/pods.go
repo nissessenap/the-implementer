@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -125,9 +124,7 @@ func (p *Pods) pod(ip string) (*corev1.Pod, error) {
 	if len(objs) != 1 {
 		return nil, fmt.Errorf("%d pods with IP %s", len(objs), ip)
 	}
-	pod, ok := objs[0].(*corev1.Pod)
-	if !ok {
-		return nil, errors.New("not a pod")
-	}
-	return pod, nil
+	// A plain assertion: the index function above returns no key for anything
+	// that is not a *Pod, so nothing else can be under this one.
+	return objs[0].(*corev1.Pod), nil
 }

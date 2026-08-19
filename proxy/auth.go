@@ -2,12 +2,10 @@ package proxy
 
 import (
 	"crypto/hmac"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 
 	"golang.org/x/time/rate"
@@ -67,19 +65,6 @@ func (s *Server) authenticate(r *http.Request) (Run, int, error) {
 		return fail(http.StatusProxyAuthRequired, fmt.Errorf("wrong secret for %q", claim))
 	}
 
-	// The failure limiter shapes *rate*, and only after the fact: a token is spent
-	// when a request has already failed, so nothing stops N callers entering the
-	// resolve wait together on one token's worth of budget. A slot bounds the
-	// standing cost of that wait instead. Refused without spending a token — a
-	// full resolver is our problem, not evidence about this caller.
-	select {
-	case s.sem <- struct{}{}:
-	default:
-		return Run{}, http.StatusTooManyRequests, errors.New("resolver is full")
-	}
-	// Deferred rather than released on the next line: a resolver that panics must
-	// not retire a slot permanently, and everything after it is a struct compare.
-	defer func() { <-s.sem }()
 	got, err := s.resolve(r.Context(), ip)
 	if err != nil {
 		return fail(http.StatusForbidden, err)
@@ -94,26 +79,10 @@ func (s *Server) authenticate(r *http.Request) (Run, int, error) {
 }
 
 // proxyBasicAuth is http.Request.BasicAuth for the proxy header, which net/http
-// has no accessor for.
+// has no accessor for — so it is handed the same header under the name it does.
 func proxyBasicAuth(h string) (user, pass string, ok bool) {
-	const prefix = "Basic "
-	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-		return "", "", false
-	}
-	raw, err := base64.StdEncoding.DecodeString(h[len(prefix):])
-	if err != nil {
-		return "", "", false
-	}
-	user, pass, ok = strings.Cut(string(raw), ":")
-	return user, pass, ok
+	return (&http.Request{Header: http.Header{"Authorization": {h}}}).BasicAuth()
 }
-
-// How many callers may be inside the resolver at once. It is the wait in Pods.Run
-// that this bounds, not the index lookup, which is a map read.
-//
-// ponytail: a flat cap, not per-IP. One namespace of runs is nowhere near it;
-// make it per-IP if one noisy run ever starves the others.
-const resolving = 64
 
 // failLimiter rate-limits authentication failures per source address. Keyed by IP
 // so one misconfigured pod cannot lock the others out.

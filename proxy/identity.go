@@ -22,12 +22,9 @@ const (
 	// the whole point of the second factor: a re-run of the same issue must not
 	// inherit the previous run's credential.
 	//
-	// ADR 0005 says "job-UID", and that cannot be built: the apiserver assigns a
-	// Job's UID at create time, spec.template is immutable afterwards, and the
-	// sandbox cannot derive the secret itself (it holds no shared key) — so
-	// nothing can ever put a real Job UID into the pod's environment. A value the
-	// creator picks has the freshness property the UID was chosen for and can
-	// actually be written. Amend the ADR, do not "fix" this back.
+	// A value the orchestrator picks, not the Job's UID ADR 0005 originally named
+	// — that one cannot be written into a pod at all. The ADR's 2026-08-19
+	// amendment has the argument; do not "fix" this back without reading it.
 	AnnRunUID = "implementer.dev/run-uid"
 )
 
