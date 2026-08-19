@@ -188,7 +188,7 @@ func proxyFor(t *testing.T, sans ...string) (proxyAddr string, dialed *string, g
 	up.StartTLS()
 	t.Cleanup(up.Close)
 
-	s := New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil })
+	s := New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }, nil)
 	s.tr.TLSClientConfig.RootCAs = pool
 	addr := new(string)
 	real := (&net.Dialer{}).DialContext
@@ -285,7 +285,7 @@ func TestTunnelIsOpaque(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }))
+	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }, nil))
 	defer px.Close()
 
 	// Pipelined, so this also asserts the bytes buffered with the CONNECT are not
@@ -351,7 +351,7 @@ func TestTunnelEndsOnUpstreamHalfClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }))
+	px := httptest.NewServer(New(certs, testKey, func(context.Context, string) (Run, error) { return testRun, nil }, nil))
 	defer px.Close()
 
 	raw, br := connect(t, strings.TrimPrefix(px.URL, "http://"), up.Addr().String(), "")

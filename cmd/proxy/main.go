@@ -43,6 +43,25 @@ func main() {
 	if key = bytes.TrimSpace(key); len(key) == 0 {
 		log.Fatalf("RUN_KEY_FILE=%s is empty", keyFile)
 	}
+	// Optional, and the only credential this proxy holds today. Absent, it is
+	// still a working interception proxy — every host comes out tokenless, which
+	// is what e2e stages 30 and 40 exercise.
+	var creds []*proxy.Credential
+	if f := os.Getenv("GITHUB_TOKEN_FILE"); f != "" {
+		gh, err := proxy.StaticGitHub(f)
+		if err != nil {
+			log.Fatalf("GITHUB_TOKEN_FILE=%s: %v", f, err)
+		}
+		creds = append(creds, gh)
+	}
+	// Validated against the certificate here, at boot: a credential bound to a
+	// host we cannot intercept can never fire, and the symptom months later is an
+	// unauthenticated request rather than an error.
+	credFor, err := proxy.NewCreds(certs, creds...)
+	if err != nil {
+		log.Fatalf("credentials: %v", err)
+	}
+
 	ns := os.Getenv("POD_NAMESPACE")
 	if ns == "" {
 		log.Fatal("POD_NAMESPACE is required: it is the only namespace we watch pods in")
@@ -67,7 +86,7 @@ func main() {
 	// this port, so a second place to change it is a second place to get it wrong.
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: proxy.New(certs, key, pods.Run),
+		Handler: proxy.New(certs, key, pods.Run, credFor),
 
 		// The two timeouts a CONNECT proxy can actually set. Every pod in the
 		// cluster can reach this port — there is no NetworkPolicy in MVP — and

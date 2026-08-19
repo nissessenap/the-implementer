@@ -24,7 +24,7 @@ func gate(t *testing.T, pod Run, podErr error) func(user, pass string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(certs, testKey, func(context.Context, string) (Run, error) { return pod, podErr })
+	s := New(certs, testKey, func(context.Context, string) (Run, error) { return pod, podErr }, nil)
 	// Never reached by a refusal, and a loud failure if one gets through.
 	s.dial = func(_ context.Context, _, addr string) (net.Conn, error) {
 		return nil, errors.New("dialled " + addr + " for a request that should have been refused")

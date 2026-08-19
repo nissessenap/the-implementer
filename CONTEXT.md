@@ -34,10 +34,25 @@ on it, and the per-host credential switch is what keeps `-docker.pkg.dev`
 tokenless.
 
 **Sentinel** — a worthless string standing where a credential would be
-(`GH_TOKEN=proxy-injected`). The proxy swaps it for the real token in flight.
+(`GH_TOKEN=proxy-injected…`). The proxy swaps it for the real token in flight.
 The point of the sentinel is that the sandbox's code path is *unchanged*: the
 phase script still builds an authenticated URL, the value is just no longer
-worth stealing.
+worth stealing. Padded to the real token's 40 bytes — the swap only touches a
+header today, so the equal length costs nothing and is what stops a future
+credential-in-a-body swap from shifting `Content-Length`. Matched on its
+**prefix** rather than whole:
+this component's one unacceptable failure is a silent no-op, and a sandbox
+holding the unpadded string must swap rather than push anonymously.
+
+**Credential switch** (`credFor`, spelled `Creds.For` in the proxy) — the
+per-host answer to "what is this host due". Each credential names its own host set, validated at load to be a subset of
+the intercept list, and a host nobody names gets nothing. That is what keeps the
+deliberately-wider certificate safe: `-docker.pkg.dev` and
+`objects.githubusercontent.com` are both intercepted and both tokenless, the
+latter because pre-signed blob URLs carry their own authorization already. Host
+matching is case-insensitive at both ends, because x509's is: a host the
+certificate intercepts under one casing and the switch misses under another is
+an anonymous request with no error.
 
 **Run identity** — `owner`, `repo`, `issue` and `run-uid` in **annotations**
 (prefixed `implementer.dev/`), not labels,

@@ -58,10 +58,14 @@ thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
 else via `E2E_IMAGE_LOAD` (a command taking the image name).
 
-Stages run in filename order, and no stage so far needs a real credential of any
-kind, so the whole thing runs on fork pull requests too — the run secret the proxy
-authenticates against is derived from a key the harness invents. Adding a stage is adding a file
-to [`e2e/`](e2e/).
+Stages run in filename order, and every stage but one needs no real credential of
+any kind, so the whole thing runs on fork pull requests too — the run secret the
+proxy authenticates against is derived from a key the harness invents. The
+exception is the GitHub sentinel swap, which skips itself unless
+`E2E_GITHUB_TOKEN` and `E2E_GITHUB_REPO` name a scratch repository it may
+push a dry run against; what it proves — both credential shapes and git's 401
+round-trip — is covered offline by `go test ./proxy`. Adding a stage is adding a
+file to [`e2e/`](e2e/).
 
 ## Roadmap
 
