@@ -22,6 +22,11 @@ const SentinelPrefix = "proxy-injected"
 // token's 40 bytes, so a swap never changes a request's length. Exported so the
 // orchestrator writes exactly what this matches; TestSentinelIsTokenLength has
 // the why.
+//
+// ponytail: 40 is a classic PAT and an installation token (`ghp_`/`ghs_` plus 36),
+// which is every token this proxy hands out. A fine-grained PAT is ~93 bytes and
+// would defeat the equal-length property silently — harmless while the swap only
+// rewrites a header, and the ticket that mounts one has to widen this.
 const Sentinel = SentinelPrefix + "--------------------------"
 
 // Credential is one credential and the exact hosts it may be attached to. The host set
@@ -129,7 +134,18 @@ func (cr *Credential) swap(ctx context.Context, req *http.Request, host string) 
 		}
 		user, pass, ok := strings.Cut(string(raw), ":")
 		if !ok {
-			log.Printf("%s: Basic credential without a colon passed through", host)
+			// Logged and not swapped: RFC 7617 Basic always carries the colon,
+			// even with an empty password, so no client `git` or `gh` use emits
+			// this. But the whole decoded value is checkable here, so the log can
+			// say which of the two this is — an ordinary pass-through, or a
+			// sentinel that went upstream unswapped and made the request
+			// anonymous. The second is this component's one unacceptable failure,
+			// and it must not read like the first.
+			if isSentinel(user) {
+				log.Printf("%s: THE SENTINEL PASSED THROUGH UNSWAPPED — a Basic credential with no colon; this request is anonymous", host)
+			} else {
+				log.Printf("%s: Basic credential without a colon passed through", host)
+			}
 			return false, nil
 		}
 		if !isSentinel(user) && !isSentinel(pass) {
@@ -193,14 +209,18 @@ func StaticGitHub(file string) (*Credential, error) {
 		}
 		// Trimmed, because a token that arrives from a file rather than
 		// --from-literal carries a trailing newline and GitHub answers 401.
-		return strings.TrimSpace(string(b)), nil
+		tok := strings.TrimSpace(string(b))
+		// Empty is refused *here* rather than only at load, because this closure
+		// runs per request: a Secret rotated to an empty value would otherwise
+		// swap in nothing, send `Basic base64(x-access-token:)` — an anonymous
+		// request — and log it as a successful swap. Refused, it is a 502.
+		if tok == "" {
+			return "", fmt.Errorf("%s is empty", file)
+		}
+		return tok, nil
 	}
-	tok, err := read()
-	if err != nil {
+	if _, err := read(); err != nil {
 		return nil, err
-	}
-	if tok == "" {
-		return nil, fmt.Errorf("%s is empty", file)
 	}
 	return &Credential{
 		Name:  "github",

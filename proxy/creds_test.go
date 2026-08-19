@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -199,6 +200,15 @@ func TestStaticGitHubRereads(t *testing.T) {
 	if got, _ := c.Token(context.Background()); got != "ghs_rotated" {
 		t.Errorf("a rotated Secret was not picked up: %q", got)
 	}
+	// Rotated to an empty value, which the *per-request* read has to refuse. Left
+	// to the load-time check alone it swaps in nothing and sends
+	// `Basic base64(x-access-token:)` — an anonymous request, logged as a swap.
+	if err := os.WriteFile(f, []byte("  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := c.Token(context.Background()); err == nil {
+		t.Errorf("an empty rotation was handed out as the token %q", tok)
+	}
 
 	if _, err := StaticGitHub(t.TempDir() + "/absent"); err == nil {
 		t.Error("StaticGitHub accepted a missing file")
@@ -348,5 +358,18 @@ func TestUnreadableCredentialRefuses(t *testing.T) {
 	}
 	if strings.Contains(*f.seen, SentinelPrefix) {
 		t.Errorf("upstream saw %q — the sentinel was forwarded", *f.seen)
+	}
+}
+
+// The sentinel exists twice — here and in e2e/lib.sh, which cannot import Go. This
+// is the only thing tying the copies together: stage 50 skips itself without a real
+// token, so drift would not surface there either.
+func TestShellSentinelMatches(t *testing.T) {
+	b, err := os.ReadFile("../e2e/lib.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "SENTINEL='" + Sentinel + "'"; !bytes.Contains(b, []byte(want)) {
+		t.Errorf("e2e/lib.sh no longer carries %s", want)
 	}
 }
