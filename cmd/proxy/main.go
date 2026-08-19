@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"log"
 	"net/http"
@@ -44,9 +45,9 @@ func main() {
 	if key = bytes.TrimSpace(key); len(key) == 0 {
 		log.Fatalf("RUN_KEY_FILE=%s is empty", keyFile)
 	}
-	// Optional, and the only credential this proxy holds today. Absent, it is
-	// still a working interception proxy — every host comes out tokenless, which
-	// is what e2e stages 30 and 40 exercise.
+	// Optional, like every credential here. With none of them the proxy is still a
+	// working interception proxy — every host comes out tokenless, which is what
+	// e2e stages 30 and 40 exercise.
 	//
 	// Two ways to hold it, and refusing both at once is the point: they are not
 	// equivalent — one is scoped to the calling run's repository and the other is
@@ -86,6 +87,29 @@ func main() {
 			log.Fatalf("GITHUB_TOKEN_FILE=%s: %v", tokenFile, err)
 		}
 		creds = append(creds, gh)
+	}
+	// Artifact Registry, on the proxy's own Google identity — Workload Identity,
+	// and so a metadata server. There is nowhere to mount a key, deliberately, so
+	// a cluster without one cannot turn this on. Off by default and explicitly on
+	// rather than "on whenever ADC happens to resolve": the certificate covers
+	// `*.pkg.dev` either way, so attaching a Google token is the operator's
+	// decision and not a side effect of where the pod runs.
+	//
+	// Parsed rather than compared to "true", so `GAR_ENABLED=yes` is a boot
+	// failure instead of a silently tokenless registry.
+	if on, err := strconv.ParseBool(cmp.Or(os.Getenv("GAR_ENABLED"), "false")); err != nil {
+		log.Fatalf("GAR_ENABLED=%s: %v", os.Getenv("GAR_ENABLED"), err)
+	} else if on {
+		// Blocking, like the App key check above: it resolves ADC and spends one
+		// token, so a proxy that can reach no Google identity at all never goes
+		// ready. It cannot tell a *wrong* one from a right one — a GKE cluster
+		// with no Workload Identity binding lends its node pool's service account
+		// and everything works — so GAR logs the identity's email instead.
+		gar, err := proxy.GAR(context.Background())
+		if err != nil {
+			log.Fatalf("Artifact Registry: %v", err)
+		}
+		creds = append(creds, gar)
 	}
 	// Validated against the certificate here, at boot: a credential bound to a
 	// host we cannot intercept can never fire, and the symptom months later is an

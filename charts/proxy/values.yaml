@@ -55,6 +55,36 @@ githubApp:
   # key exists in the cluster at all.
   keySecretName: ""
 
+# Artifact Registry. On, the proxy attaches its own Google identity as a plain
+# bearer to `{region}-go.pkg.dev` and `{region}-python.pkg.dev`, so the sandbox
+# installs private packages holding no Google credential — not even a sentinel,
+# because `pip` and `go mod download` send none and do not retry on a 401.
+#
+# `{region}-docker.pkg.dev` is on the same certificate and stays **tokenless**:
+# its challenge/response fires only on unauthenticated requests, so attaching a
+# bearer may suppress the dance. Unmeasured, and #28's.
+#
+# Off by default rather than "on whenever a Google credential happens to resolve":
+# the certificate covers `*.pkg.dev` either way, so this is the operator's call.
+#
+# Operator prerequisites:
+#
+#   - `roles/artifactregistry.reader` on the proxy's Google service account, at
+#     the project or the repository. It is the only new grant this needs — the
+#     token itself is the same identity that signs the App JWT.
+#   - reach it with Workload Identity: serviceAccountAnnotations below, exactly as
+#     for the KMS key. **Not optional, and it fails quietly if you forget**: with
+#     no binding the GKE metadata server hands this pod the *node's* service
+#     account, so the proxy would attach an identity nobody chose — and it would
+#     work, which is worse. There is no second identity here, and there is no key file:
+#     a service account key in a Secret is the long-lived credential Workload
+#     Identity exists to delete, and this chart offers nowhere to put one. A
+#     cluster with no metadata server therefore cannot turn this on — which is why
+#     the kind/k3s e2e proves the mechanism with a fake token source in `go test`
+#     rather than with a credential (see proxy/gar_test.go).
+gar:
+  enabled: false
+
 # Annotations for the proxy's ServiceAccount — Workload Identity's binding to a
 # Google service account lives here, and nothing else does.
 serviceAccountAnnotations: {}

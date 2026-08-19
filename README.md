@@ -58,19 +58,24 @@ thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
 else via `E2E_IMAGE_LOAD` (a command taking the image name).
 
-Stages run in filename order, and every stage but the last two needs no real
+Stages run in filename order, and every stage but the last three needs no real
 credential of any kind, so the whole thing runs on fork pull requests too — the
 run secret the proxy authenticates against is derived from a key the harness
-invents. The two exceptions skip themselves unless they are given one:
+invents. The exceptions skip themselves unless they are given one:
 
 - the **sentinel swap** wants `E2E_GITHUB_TOKEN` and `E2E_GITHUB_REPO`, a scratch
   repository it may push a dry run against;
 - the **minted token** wants `E2E_GITHUB_APP_ID`, `E2E_GITHUB_APP_KEY` (the PEM
   GitHub hands out) and `E2E_GITHUB_REPO` the App is installed on, plus an
-  optional `E2E_GITHUB_OTHER_REPO` for the negative clone.
+  optional `E2E_GITHUB_OTHER_REPO` for the negative clone;
+- **GAR injection** wants `E2E_GAR_INDEX` and `E2E_GAR_PACKAGE`, a private wheel
+  it may install. It also wants a proxy that can reach a metadata server, because
+  the Google identity is Workload Identity and there is nowhere to mount a key —
+  so on kind and k3s this one stays skipped by construction.
 
-What they prove — both credential shapes, git's 401 round-trip, and the mint's
-scope, cache and refresh — is covered offline by `go test ./proxy`. Adding a
+What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
+cache and refresh, and the GAR attach against a fake token source — is covered
+offline by `go test ./proxy`. Adding a
 stage is adding a file to [`e2e/`](e2e/).
 
 ## Roadmap

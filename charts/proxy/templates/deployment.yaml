@@ -69,6 +69,13 @@ spec:
             - { name: GITHUB_APP_KEY, value: {{ .Values.githubApp.key | quote }} }
             {{- end }}
             {{- end }}
+            {{- if .Values.gar.enabled }}
+            # Artifact Registry, on the proxy's own Google identity — Workload
+            # Identity, via serviceAccountAnnotations, and nothing else: there is
+            # no key file to mount, so a cluster with no metadata server cannot
+            # turn this on at all.
+            - { name: GAR_ENABLED, value: "true" }
+            {{- end }}
             {{- if .Values.githubTokenSecretName }}
             # Set only when there is a Secret to read: absent, the proxy binds no
             # credential to any host and every request comes out as the sandbox

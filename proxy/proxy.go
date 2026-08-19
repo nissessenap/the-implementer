@@ -9,9 +9,10 @@
 //
 // What is here so far: an https_proxy that authenticates the run calling it,
 // resolves that run's identity from Kubernetes, terminates TLS for the hosts its
-// own certificate names while tunnelling everything else opaquely, and swaps the
-// sentinel for the real credential on the hosts a credential is bound to. GAR
-// (#54) and Vertex (#55) land as further entries in that same per-host switch.
+// own certificate names while tunnelling everything else opaquely, and attaches
+// each host's credential — swapping the sentinel for a GitHub token, and putting
+// the proxy's own Google identity on Artifact Registry. Vertex (#55) lands as a
+// further entry in that same per-host switch.
 //
 // Egress is unrestricted on purpose: the allowlist and the NetworkPolicy are
 // post-MVP with #16. Every CONNECT is logged, which is the inventory that ticket
@@ -266,7 +267,11 @@ func (s *Server) serve(c net.Conn, authority string, run Run) {
 				_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 				return
 			case swapped:
-				log.Printf("%s: swapped the sentinel for the %q credential", host, cred.Name)
+				// Per shape, because this is the one place an operator goes to
+				// check whether the swap happened: the GAR credential attaches
+				// one where the sandbox sent nothing at all, and calling that a
+				// swap would be a lie exactly where it costs the most.
+				log.Printf("%s: %s the %q credential", host, cred.verb(), cred.Name)
 			}
 		}
 

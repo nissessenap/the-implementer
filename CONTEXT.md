@@ -52,7 +52,37 @@ deliberately-wider certificate safe: `-docker.pkg.dev` and
 latter because pre-signed blob URLs carry their own authorization already. Host
 matching is case-insensitive at both ends, because x509's is: a host the
 certificate intercepts under one casing and the switch misses under another is
-an anonymous request with no error.
+an anonymous request with no error. Both normalisations, because x509 does both:
+it folds case and trims the root label, so `CONNECT github.com.:443` is
+intercepted too.
+
+A host set is exact names, or one `*` standing for part of the leftmost
+label — `*-go.pkg.dev`, because Artifact Registry's endpoints are regional and
+pinning a region would be a second place to configure one. Narrower than x509's
+wildcard rule on purpose, and validated through one sample host, which is sound
+because every name such a pattern matches differs from that sample in the
+leftmost label alone.
+
+**Attached credential** — the other of the switch's two shapes, and the opposite
+of the sentinel swap: the request leaves with a bearer whether or not it arrived
+with one, and anything it did arrive with is overwritten. Per-credential, because
+each shape is wrong on the other's hosts — `pip` and `go mod download` send
+Artifact Registry nothing at all and do not retry on a 401, so there is no
+sentinel to match; while on `api.github.com` an unconditional Basic is *ignored*
+(measured: 200, limit 60, no error), which is a silent anonymous request.
+
+**GAR credential** — the proxy's own Google identity, attached to
+`{region}-go.pkg.dev` and `{region}-python.pkg.dev` so the sandbox installs
+private packages holding nothing — not a token, and not even a sentinel. Workload
+Identity and no key file: a service account key in a Secret is the long-lived
+credential Workload Identity exists to delete, so a cluster with no metadata
+server cannot turn this on, and kind proves the mechanism against a fake token
+source instead. The authorization is one grant,
+`roles/artifactregistry.reader`. `{region}-docker.pkg.dev` is on the same
+certificate and stays **tokenless**: its `/v2/` challenge fires only on
+unauthenticated requests, so attaching a bearer may suppress a dance the proxy
+cannot yet answer, and blob fetches redirect to storage URLs that must not carry
+our token either.
 
 **Minted installation token** — what the GitHub credential actually is: an
 installation token the proxy mints per run, scoped by
