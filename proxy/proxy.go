@@ -51,7 +51,7 @@ type Server struct {
 
 	// credFor: which credential, if any, an intercepted host is due. Nil is a
 	// proxy that holds none, which is every test that is not about credentials.
-	creds *Creds
+	creds Creds
 
 	// The shared key the run secret is derived from, and the source-IP to run
 	// lookup it must agree with. A field rather than a *Pods, so a test needs no
@@ -70,7 +70,7 @@ type Server struct {
 // source IP to run, and the credentials it attaches. The certificate decides which
 // hosts it may terminate, the key and resolver decide who may ask it to, and creds
 // decides what each intercepted host is handed.
-func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) (Run, error), creds *Creds) *Server {
+func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) (Run, error), creds Creds) *Server {
 	s := &Server{
 		certs:   certs,
 		creds:   creds,
@@ -214,19 +214,6 @@ func (s *Server) intercept(w http.ResponseWriter, r *http.Request) {
 	s.serve(tc, authority)
 }
 
-// writeStatus answers a hijacked connection with a bare status. The connection is
-// past net/http's reach, so this is the only way left to refuse a request.
-func writeStatus(c net.Conn, code int) {
-	resp := &http.Response{
-		StatusCode: code,
-		ProtoMajor: 1, ProtoMinor: 1,
-		Header: http.Header{},
-		Body:   http.NoBody,
-		Close:  true,
-	}
-	_ = resp.Write(c)
-}
-
 // serve is a hand-rolled HTTP/1.1 loop rather than httputil.ReverseProxy because
 // the connection is already hijacked: there is no Listener to hand to a Server,
 // and the one-connection-Listener adapters all leak either a goroutine or the
@@ -271,7 +258,9 @@ func (s *Server) serve(c net.Conn, authority string) {
 				// its credential sends the sentinel to GitHub, which is both a
 				// leak and an anonymous request that looks like a rate limit.
 				log.Printf("%s: credential %q unavailable: %v", authority, cred.Name, err)
-				writeStatus(c, http.StatusBadGateway)
+				// Hand-written: the connection is past net/http's reach, so a
+				// status line is all that is left to refuse a request with.
+				_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 				return
 			case swapped:
 				log.Printf("%s: swapped the sentinel for the %q credential", host, cred.Name)

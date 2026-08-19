@@ -144,7 +144,7 @@ func TestCredsAreBoundPerHost(t *testing.T) {
 	}
 
 	// A nil switch is a proxy holding no credentials, which is stages 30 and 40.
-	if (*Creds)(nil).For("github.test") != nil {
+	if Creds(nil).For("github.test") != nil {
 		t.Error("a nil Creds handed out a credential")
 	}
 }

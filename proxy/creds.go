@@ -5,35 +5,23 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 )
 
-// SentinelPrefix is what makes a credential recognisably worthless. The sandbox's
-// GH_TOKEN starts with it, and anything presented to a credentialed host that
-// starts with it is swapped for the real thing.
-//
-// A prefix rather than an equality test on Sentinel below, deliberately: the one
-// failure mode this component must not have is a *silent* no-op, and a sandbox
-// holding the unpadded string would otherwise push anonymously with no error and
-// no log. Matching loosely costs nothing — anyone holding the sentinel already
-// gets a token by presenting it correctly.
+// SentinelPrefix is what makes a credential recognisably worthless, and the swap
+// matches on it rather than on the whole of Sentinel: a sandbox holding the
+// unpadded string must still swap, because the one failure this component may not
+// have is a silent anonymous push.
 const SentinelPrefix = "proxy-injected"
 
-// Sentinel is the value the sandbox actually carries: SentinelPrefix padded to 40
-// bytes, which is what every GitHub token this proxy swaps in measures (`ghs_` or
-// `ghp_` plus 36).
-//
-// The swap only rewrites a header today, and no framing depends on a header's
-// length — so the padding buys nothing *yet*, and that is the point of doing it
-// now rather than later. The moment a credential travels in a body, an unequal
-// swap shifts Content-Length, and the symptom is a broken request nowhere near
-// this code. Equal lengths make that impossible for free.
-//
-// Exported so the orchestrator writes into the sandbox exactly what this matches,
-// from one constant — the same seam as the annotation names in identity.go.
-// A token of some other length is not an error, only a warning; see StaticGitHub.
+// Sentinel is what the sandbox actually carries — the prefix padded to a GitHub
+// token's 40 bytes, so a swap never changes a request's length. Exported so the
+// orchestrator writes exactly what this matches; TestSentinelIsTokenLength has
+// the why.
 const Sentinel = SentinelPrefix + "--------------------------"
 
 // Credential is one credential and the exact hosts it may be attached to. The host set
@@ -59,16 +47,14 @@ type Credential struct {
 
 // Creds is credFor: the per-host switch deciding which credential, if any, a
 // request to an intercepted host is due.
-type Creds struct {
-	byHost map[string]*Credential
-}
+type Creds map[string]*Credential
 
 // NewCreds binds credentials to hosts and refuses at load — not at request time —
 // anything the certificate does not cover. A credential naming a host we do not
 // intercept can never fire, so it is a config error that would otherwise show up
 // as an unauthenticated request months later.
-func NewCreds(certs *Certs, creds ...*Credential) (*Creds, error) {
-	c := &Creds{byHost: map[string]*Credential{}}
+func NewCreds(certs *Certs, creds ...*Credential) (Creds, error) {
+	c := Creds{}
 	for _, cr := range creds {
 		if len(cr.Hosts) == 0 {
 			return nil, fmt.Errorf("credential %q is bound to no hosts", cr.Name)
@@ -82,32 +68,19 @@ func NewCreds(certs *Certs, creds ...*Credential) (*Creds, error) {
 			if !certs.Intercepts(h) {
 				return nil, fmt.Errorf("credential %q names %s, which is not on the certificate", cr.Name, h)
 			}
-			if prev, ok := c.byHost[h]; ok {
+			if prev, ok := c[h]; ok {
 				return nil, fmt.Errorf("%s is claimed by both %q and %q", h, prev.Name, cr.Name)
 			}
-			c.byHost[h] = cr
+			c[h] = cr
 		}
 	}
-	log.Printf("creds: %d host(s) carry a credential: %v", len(c.byHost), c.hosts())
+	log.Printf("creds: %d host(s) carry a credential: %v", len(c), slices.Sorted(maps.Keys(c)))
 	return c, nil
 }
 
-func (c *Creds) hosts() []string {
-	hs := make([]string, 0, len(c.byHost))
-	for h := range c.byHost {
-		hs = append(hs, h)
-	}
-	return hs
-}
-
-// For is the switch itself. A nil *Creds answers "no credential" for every host,
+// For is the switch itself. A nil Creds answers "no credential" for every host,
 // which is what a proxy configured with none is.
-func (c *Creds) For(host string) *Credential {
-	if c == nil {
-		return nil
-	}
-	return c.byHost[strings.ToLower(host)]
-}
+func (c Creds) For(host string) *Credential { return c[strings.ToLower(host)] }
 
 // isSentinel is the one definition of "this credential is worthless". A prefix
 // rather than equality on Sentinel: see SentinelPrefix.
@@ -228,11 +201,6 @@ func StaticGitHub(file string) (*Credential, error) {
 	}
 	if tok == "" {
 		return nil, fmt.Errorf("%s is empty", file)
-	}
-	if len(tok) != len(Sentinel) {
-		log.Printf("creds: github token is %d bytes and the sentinel is %d — "+
-			"the swap still works, but Content-Length shifts by %d",
-			len(tok), len(Sentinel), len(tok)-len(Sentinel))
 	}
 	return &Credential{
 		Name:  "github",
