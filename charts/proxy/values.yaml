@@ -17,10 +17,55 @@ tlsSecretName: proxy-leaf-tls
 # Its key is `key`, fixed in the Deployment.
 runKeySecretName: proxy-run-key
 
-# The Secret holding the GitHub token the proxy swaps the sentinel for. Empty is
-# a working proxy that holds no credential — it still intercepts, it just hands
-# nothing out. #53 replaces this with a token the proxy mints per run; the static
-# path stays as the seam that keeps the swap testable with no App and no signer.
+# The GitHub App the proxy mints installation tokens as — the production path.
+# Every token it hands out is scoped to the repository the calling run's
+# annotations name, so a compromised sandbox holds a credential for its own
+# repository and nothing else.
+#
+# The App's private key never exists in this cluster. `provider` names who signs
+# on the proxy's behalf and `key` is that signer's reference:
+#
+#   provider: gcp   key: projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/1
+#   provider: file  keySecretName: my-app-key   (a PKCS#1 PEM under the key `key`)
+#
+# The provider must also be *linked into the image* — `make image GO_TAGS=…`, see
+# the Makefile. Naming one that is not is a boot failure, by name.
+#
+# Operator prerequisites for `gcp`, and the first is the one that bites: the KMS
+# key is an **import**, not generate-in-place. GitHub generates the App's key pair
+# and offers no bring-your-own-public-key, so the only way a KMS holds it is
+# `gcloud kms keys versions import`. Which in turn means:
+#
+#   - purpose ASYMMETRIC_SIGN, algorithm RSA_SIGN_PKCS1_2048_SHA256, protection
+#     level SOFTWARE (HSM cannot import a 2048-bit RSA key from GitHub's PEM)
+#   - the proxy's Google service account needs roles/cloudkms.signerVerifier
+#     *and* cloudkms.cryptoKeyVersions.get — the second is what the boot-time key
+#     validation this proxy always enables costs
+#   - reach it with Workload Identity: set serviceAccountAnnotations below to
+#     iam.gke.io/gcp-service-account: proxy@PROJECT.iam.gserviceaccount.com
+#
+# Empty appId is a proxy that mints nothing.
+githubApp:
+  appId: ""
+  provider: gcp
+  key: ""
+  # For `file` only, and the chart refuses to render otherwise: a Secret whose
+  # `key` entry is a PKCS#1 PEM, mounted at /run/github-app/key and used as `key`
+  # above. This is the e2e's path, and it is the one shape where the App's private
+  # key exists in the cluster at all.
+  keySecretName: ""
+
+# Annotations for the proxy's ServiceAccount — Workload Identity's binding to a
+# Google service account lives here, and nothing else does.
+serviceAccountAnnotations: {}
+
+# The Secret holding a static GitHub token the proxy swaps the sentinel for. The
+# seam that keeps the swap testable with no App, no signer and no KMS — and not
+# the production path: a static token is scoped to whatever the operator put in
+# the Secret, where a minted one is scoped to the calling run's repository.
+# Mutually exclusive with githubApp.appId: setting both fails the render, and
+# fails cmd/proxy's boot for anyone deploying without this chart. There is no
+# precedence rule, deliberately — the two are not interchangeable.
 # Its key is `token`, fixed in the Deployment.
 githubTokenSecretName: ""
 

@@ -29,7 +29,7 @@ Settled so far:
 - **No `kubectl exec` in the run path.** The pod's own `command` is the run plan. Results leave via the pod's termination message and its logs — both plain reads on objects the orchestrator already watches.
 - **The orchestrator opens the PR, not the agent.** The sandbox gets `contents: write` and nothing more. A deterministic PR is also diagnosable when the run *failed*, which an agent-authored PR can never be.
 - **The sandbox holds no credentials.** Model calls, GitHub, and private package registries all leave through a proxy that terminates credentials on the way out. The sandbox's `GH_TOKEN` is a worthless sentinel string the proxy swaps for a real token mid-flight; it never holds a model or cloud credential at all. Demonstrated end to end — [#33](https://github.com/nissessenap/the-implementer/issues/33), [#34](https://github.com/nissessenap/the-implementer/issues/34).
-- **The proxy mints the GitHub token, and Cloud KMS signs the App JWT.** So the App private key exists only inside KMS, and what the proxy holds is a revocable, audit-logged signing *capability* rather than key bytes. KMS ties this to GCP, so the signing step stays behind a seam — a plain-key signer for non-GCP operators is a later addition, not a rewrite. [#36](https://github.com/nissessenap/the-implementer/issues/36).
+- **The proxy mints the GitHub token, and Cloud KMS signs the App JWT.** So the App private key exists only inside KMS, and what the proxy holds is a revocable, audit-logged signing *capability* rather than key bytes. The signer is [`isometry/ghait`](https://github.com/isometry/ghait), which implements `ghinstallation.Signer` for GCP KMS, AWS KMS, Azure Key Vault, Vault and a local PEM — selected by build tag, so the non-GCP operator story is a build flag rather than a rewrite. Every token is minted **for the repository the run's annotations name**, never for the one the request URL names. [#36](https://github.com/nissessenap/the-implementer/issues/36).
 - **Scion is not a dependency.** [Scion](https://github.com/GoogleCloudPlatform/scion) evaluated agent-sandbox and deliberately removed it, and webhook-driven agent creation is an explicit non-goal in its design docs. It stays useful as prior art.
 
 Nothing architectural is still open. Egress allowlisting and `NetworkPolicy` enforcement are *decided but not built* — MVP ships open egress, and the target shape is in [the architecture document](docs/architecture.md#7-network-egress).
@@ -58,14 +58,20 @@ thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
 else via `E2E_IMAGE_LOAD` (a command taking the image name).
 
-Stages run in filename order, and every stage but one needs no real credential of
-any kind, so the whole thing runs on fork pull requests too — the run secret the
-proxy authenticates against is derived from a key the harness invents. The
-exception is the GitHub sentinel swap, which skips itself unless
-`E2E_GITHUB_TOKEN` and `E2E_GITHUB_REPO` name a scratch repository it may
-push a dry run against; what it proves — both credential shapes and git's 401
-round-trip — is covered offline by `go test ./proxy`. Adding a stage is adding a
-file to [`e2e/`](e2e/).
+Stages run in filename order, and every stage but the last two needs no real
+credential of any kind, so the whole thing runs on fork pull requests too — the
+run secret the proxy authenticates against is derived from a key the harness
+invents. The two exceptions skip themselves unless they are given one:
+
+- the **sentinel swap** wants `E2E_GITHUB_TOKEN` and `E2E_GITHUB_REPO`, a scratch
+  repository it may push a dry run against;
+- the **minted token** wants `E2E_GITHUB_APP_ID`, `E2E_GITHUB_APP_KEY` (the PEM
+  GitHub hands out) and `E2E_GITHUB_REPO` the App is installed on, plus an
+  optional `E2E_GITHUB_OTHER_REPO` for the negative clone.
+
+What they prove — both credential shapes, git's 401 round-trip, and the mint's
+scope, cache and refresh — is covered offline by `go test ./proxy`. Adding a
+stage is adding a file to [`e2e/`](e2e/).
 
 ## Roadmap
 

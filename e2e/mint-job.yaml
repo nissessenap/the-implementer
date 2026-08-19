@@ -1,0 +1,131 @@
+# Stage 60's fixture. Applied by e2e/60-github-mint.sh, which substitutes
+# __RUNTIME_CLASS__, __RUN_CRED__, __SENTINEL__, __OWNER__, __REPO__ and
+# __OTHER_REPO__.
+#
+# As in stage 50, the point is what is not here: no GitHub token and no App key.
+# What is new is that the credential the proxy attaches is now *derived from the
+# annotations below*, so this manifest is both the fixture and the scope.
+#
+# ponytail: e2e/proxy-job.yaml said a third copy of the posture block and the
+# bundle assembly is when to factor them out. This is the third, and it is still
+# copied — the fixtures differ in what they assert, not in how they are built, so
+# what a template language would buy is one shared file to break all of them from.
+# Factor it out when a fourth arrives, or when a posture change has to be made in
+# three places at once.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-mint
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      annotations:
+        implementer.dev/owner: __OWNER__
+        implementer.dev/repo: __REPO__
+        implementer.dev/issue: "5"
+        implementer.dev/run-uid: stage60
+    spec:
+      restartPolicy: Never
+      __RUNTIME_CLASS__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        # The scope assertion. `GET /installation/repositories` is GitHub telling
+        # us what the token it was handed can actually reach — so it answers the
+        # only question this ticket has: is it this repository, or is it every
+        # repository the App is installed on?
+        - name: scope
+          image: curlimages/curl:8.21.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: SSL_CERT_FILE, value: /tmp/trust-bundle.crt }
+            - { name: CURL_CA_BUNDLE, value: /tmp/trust-bundle.crt }
+            - { name: https_proxy, value: "http://__RUN_CRED__@credential-proxy:8080" }
+            - { name: GH_TOKEN, value: "__SENTINEL__" }
+            - { name: WANT, value: "__OWNER__/__REPO__" }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/trust-bundle.crt
+              body=$(curl -sS --max-time 30 -H "Authorization: token $GH_TOKEN" \
+                https://api.github.com/installation/repositories)
+
+              # An installation token authenticates as the installation, so this
+              # route answers at all only because the swap happened.
+              count=$(echo "$body" | tr -d ' \n' | sed -n 's/.*"total_count":\([0-9]*\).*/\1/p')
+              [ "$count" = 1 ] || {
+                echo "!!! FAIL: the token reaches $count repositories, want exactly 1"
+                echo "$body" | head -c 400; exit 1; }
+
+              full=$(echo "$body" | tr -d ' \n' | sed -n 's/.*"full_name":"\([^"]*\)".*/\1/p' | head -1)
+              [ "$full" = "$WANT" ] || {
+                echo "!!! FAIL: the token is scoped to '$full', the annotations say '$WANT'"; exit 1; }
+              echo "PROBE mint-scope       $full  (from the annotations, not from any URL)"
+
+        # And it still works: the annotated repository clones and authenticates a
+        # write. A scope assertion that passed because the token was worthless
+        # would prove nothing.
+        - name: git
+          image: alpine/git:v2.54.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: GIT_SSL_CAINFO, value: /tmp/git-bundle.crt }
+            # The negative clone below must *fail*, not sit waiting for a human
+            # to type a password at a 404 the token was never meant to open.
+            - { name: GIT_TERMINAL_PROMPT, value: "0" }
+            - { name: https_proxy, value: "http://__RUN_CRED__@credential-proxy:8080" }
+            - { name: GIT_CONFIG_PARAMETERS, value: "'http.proxyAuthMethod=basic'" }
+            - { name: REPO, value: "__OWNER__/__REPO__" }
+            - { name: OTHER_REPO, value: "__OTHER_REPO__" }
+            - { name: SENTINEL, value: "__SENTINEL__" }
+          volumeMounts:
+            - { name: git-tmp, mountPath: /tmp }
+            - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              cat /etc/ssl/certs/ca-certificates.crt /run/proxy-ca/ca.crt > /tmp/git-bundle.crt
+
+              git clone --depth 1 -q "https://x-access-token:$SENTINEL@github.com/$REPO.git" /tmp/clone \
+                || { echo "!!! FAIL: clone of the annotated repository failed"; exit 1; }
+              echo "PROBE git-clone        ok   ($REPO, the repository the annotations name)"
+
+              cd /tmp/clone
+              git push --dry-run origin HEAD:refs/heads/implementer-e2e-probe \
+                || { echo "!!! FAIL: push-dry-run through the minted token failed"; exit 1; }
+              echo "PROBE git-push-dry-run ok   (git-receive-pack authenticated)"
+
+              # The literal shape of the rule: the request URL names another
+              # repository of the same installation, and the token it is handed
+              # cannot open it. Optional only because it needs a second private
+              # repository; the scope probe above proves the same thing from the
+              # other side.
+              if [ -n "$OTHER_REPO" ]; then
+                if git clone --depth 1 -q "https://x-access-token:$SENTINEL@github.com/$OTHER_REPO.git" /tmp/other 2>/dev/null; then
+                  echo "!!! FAIL: cloned $OTHER_REPO — the token is not scoped to the run's repository"
+                  exit 1
+                fi
+                echo "PROBE other-repo       refused ($OTHER_REPO, named by the URL and not by the annotations)"
+              else
+                echo "PROBE other-repo       skipped (set E2E_GITHUB_OTHER_REPO for the negative clone)"
+              fi
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: git-tmp, emptyDir: {} }
+        - name: proxy-ca
+          configMap: { name: proxy-ca }

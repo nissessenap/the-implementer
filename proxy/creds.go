@@ -44,10 +44,11 @@ type Credential struct {
 	// that ticket adds a pattern if it is not, and inherits the same validation.
 	Hosts []string
 
-	// Token is read per request rather than cached, so a rotated Secret takes
-	// effect without a restart. It is a file read from a tmpfs mount next to a
-	// network round-trip; #53 replaces it with a minted, cached token.
-	Token func(ctx context.Context) (string, error)
+	// Token answers "what is this run due on this host". The Run is the whole
+	// point of the signature: MintedGitHub scopes the token it mints to the
+	// repository the run's *annotations* name, never the one the request URL
+	// does, and a Token that could not see the run could not do that.
+	Token func(ctx context.Context, run Run) (string, error)
 }
 
 // Creds is credFor: the per-host switch deciding which credential, if any, a
@@ -108,7 +109,7 @@ func isSentinel(v string) bool { return strings.HasPrefix(v, SentinelPrefix) }
 //
 // A credential that is not the sentinel travels on untouched and logged: it is
 // something the sandbox brought itself, and swallowing it would only hide it.
-func (cr *Credential) swap(ctx context.Context, req *http.Request, host string) (bool, error) {
+func (cr *Credential) swap(ctx context.Context, req *http.Request, host string, run Run) (bool, error) {
 	h := req.Header.Get("Authorization")
 	if h == "" {
 		// Nothing to swap. Not an error and not an attach: every client in the
@@ -152,7 +153,7 @@ func (cr *Credential) swap(ctx context.Context, req *http.Request, host string) 
 			log.Printf("%s: the sandbox's own Basic credential passed through", host)
 			return false, nil
 		}
-		tok, err := cr.Token(ctx)
+		tok, err := cr.Token(ctx, run)
 		if err != nil {
 			return false, err
 		}
@@ -173,7 +174,7 @@ func (cr *Credential) swap(ctx context.Context, req *http.Request, host string) 
 		log.Printf("%s: the sandbox's own %s credential passed through", host, scheme)
 		return false, nil
 	}
-	tok, err := cr.Token(ctx)
+	tok, err := cr.Token(ctx, run)
 	if err != nil {
 		return false, err
 	}
@@ -198,9 +199,10 @@ var githubHosts = []string{
 // StaticGitHub is the GitHub credential read from a file — a mounted Secret
 // holding a PAT or an installation token.
 //
-// #53 replaces where the token comes from with a minted, per-repository one. This
-// path stays after it: it is the seam that keeps the swap itself testable with no
-// App, no signer and no KMS.
+// Not the production path: MintedGitHub is, and it scopes what it hands out to the
+// calling run's repository where this hands out whatever is in the Secret. This
+// stays as the seam that keeps the swap itself testable with no App, no signer and
+// no KMS. cmd/proxy refuses to boot with both.
 func StaticGitHub(file string) (*Credential, error) {
 	read := func() (string, error) {
 		b, err := os.ReadFile(file)
@@ -225,6 +227,8 @@ func StaticGitHub(file string) (*Credential, error) {
 	return &Credential{
 		Name:  "github",
 		Hosts: githubHosts,
-		Token: func(context.Context) (string, error) { return read() },
+		// The run is ignored here, and that is the seam: a static token is not
+		// scoped to anything, which is exactly why #53 replaced it in production.
+		Token: func(context.Context, Run) (string, error) { return read() },
 	}, nil
 }

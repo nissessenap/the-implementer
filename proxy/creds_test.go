@@ -40,7 +40,7 @@ func basic(user, pass string) string {
 // The count is an assertion of its own: the token must not be fetched for a
 // request that carries no sentinel.
 func staticCred(tok string, reads *int) *Credential {
-	return &Credential{Name: "github", Token: func(context.Context) (string, error) {
+	return &Credential{Name: "github", Token: func(context.Context, Run) (string, error) {
 		*reads++
 		return tok, nil
 	}}
@@ -77,7 +77,7 @@ func TestSwapSentinelShapes(t *testing.T) {
 				req.Header.Set("Authorization", tc.in)
 			}
 			reads := 0
-			got, err := staticCred(testToken, &reads).swap(context.Background(), req, "github.test")
+			got, err := staticCred(testToken, &reads).swap(context.Background(), req, "github.test", testRun)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -191,13 +191,13 @@ func TestStaticGitHubRereads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := c.Token(context.Background()); got != testToken {
+	if got, _ := c.Token(context.Background(), testRun); got != testToken {
 		t.Errorf("token = %q, want %q", got, testToken)
 	}
 	if err := os.WriteFile(f, []byte("ghs_rotated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := c.Token(context.Background()); got != "ghs_rotated" {
+	if got, _ := c.Token(context.Background(), testRun); got != "ghs_rotated" {
 		t.Errorf("a rotated Secret was not picked up: %q", got)
 	}
 	// Rotated to an empty value, which the *per-request* read has to refuse. Left
@@ -206,7 +206,7 @@ func TestStaticGitHubRereads(t *testing.T) {
 	if err := os.WriteFile(f, []byte("  \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if tok, err := c.Token(context.Background()); err == nil {
+	if tok, err := c.Token(context.Background(), testRun); err == nil {
 		t.Errorf("an empty rotation was handed out as the token %q", tok)
 	}
 
@@ -351,7 +351,7 @@ func TestSwapSurvivesTheChallenge(t *testing.T) {
 // request that reads downstream as a rate limit rather than as this failure.
 func TestUnreadableCredentialRefuses(t *testing.T) {
 	f := newSwapFixture(t, func(cr *Credential) {
-		cr.Token = func(context.Context) (string, error) { return "", errors.New("the Secret went away") }
+		cr.Token = func(context.Context, Run) (string, error) { return "", errors.New("the Secret went away") }
 	})
 	if code, _ := f.ask(t, basic("x-access-token", Sentinel)); code != http.StatusBadGateway {
 		t.Errorf("status %d, want 502", code)
@@ -371,5 +371,42 @@ func TestShellSentinelMatches(t *testing.T) {
 	}
 	if want := "SENTINEL='" + Sentinel + "'"; !bytes.Contains(b, []byte(want)) {
 		t.Errorf("e2e/lib.sh no longer carries %s", want)
+	}
+}
+
+// The plumbing behind the non-negotiable rule: what reaches the credential is the
+// run the *proxy authenticated*, and nothing the request can say changes it. The
+// fixture asks for a path naming another owner and repository entirely — which is
+// exactly what a compromised sandbox would do — and the credential must still be
+// asked for `testRun`.
+//
+// Worth a test of its own because the mint scope is only as good as this: a
+// Credential.Token handed the wrong Run mints a token for the wrong repository,
+// and the swap itself would look perfectly correct while it happened.
+func TestTheSwapSeesTheAuthenticatedRun(t *testing.T) {
+	var asked []Run
+	f := newSwapFixture(t, func(cr *Credential) {
+		inner := cr.Token
+		cr.Token = func(ctx context.Context, run Run) (string, error) {
+			asked = append(asked, run)
+			return inner(ctx, run)
+		}
+	})
+
+	if _, err := io.WriteString(f.tc,
+		"GET /someone-else/their-repo.git/info/refs?service=git-receive-pack HTTP/1.1\r\n"+
+			"Host: github.test\r\n"+
+			"Authorization: "+basic("x-access-token", Sentinel)+"\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(f.br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if len(asked) != 1 || asked[0] != testRun {
+		t.Errorf("the credential was asked for %v, want exactly [%v]", asked, testRun)
 	}
 }
