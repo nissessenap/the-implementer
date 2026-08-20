@@ -52,7 +52,7 @@ spec:
           command: ["python3", "-u", "-c"]
           args:
             - |
-              import json, os, time, urllib.error, urllib.request
+              import json, os, time, urllib.request
 
               base = os.environ["ANTHROPIC_VERTEX_BASE_URL"]
               fail = []
@@ -109,31 +109,11 @@ spec:
                   fail.append("three deltas arrived %.0f ms apart — buffered, not streamed" % (span * 1000))
               print("PROBE vertex-stream    deltas at %s ms" % [round(t * 1000) for t in at])
 
-              # 6. The route forwards model inference and nothing else. This one
-              #    is a POST to the same host under the same prefix, and
-              #    `roles/aiplatform.user` would let it run containers in the
-              #    operator's project — so it must never reach Vertex.
-              job = base + "/projects/e2e/locations/us-central1/customJobs"
-              try:
-                  urllib.request.urlopen(urllib.request.Request(job, method="POST", data=b"{}"), timeout=30)
-                  fail.append("a customJobs POST was forwarded")
-              except urllib.error.HTTPError as e:
-                  if e.code != 400:
-                      fail.append("a customJobs POST answered %d, want 400" % e.code)
-                  print("PROBE vertex-inference refused a customJobs POST (%d)" % e.code)
-
-              # 7. The location pin. It comes out of a path the sandbox writes and
-              #    it decides the host the credential is attached to, so a location
-              #    that is not one must be refused before anything is dialled.
-              bad = base + "/projects/e2e/locations/evil.com/publishers/anthropic/models/m:rawPredict"
-              try:
-                  urllib.request.urlopen(urllib.request.Request(bad, method="POST", data=b"{}"), timeout=30)
-                  fail.append("a location of 'evil.com' was accepted")
-              except urllib.error.HTTPError as e:
-                  if e.code != 400:
-                      fail.append("a bogus location answered %d, want 400" % e.code)
-                  print("PROBE vertex-location  refused (%d, before anything was dialled)" % e.code)
-
+              # What is deliberately not probed here: the refusals. Which paths and
+              # locations the route rejects is string arithmetic — TestVertexRewrite
+              # and TestVertexRewriteRefusals in proxy/vertex_test.go, no cluster
+              # needed — and this stage is for what only a cluster can be wrong
+              # about.
               if fail:
                   raise SystemExit("!!! FAIL: " + "; ".join(fail))
               print("the sandbox held no model credential and the model call worked")

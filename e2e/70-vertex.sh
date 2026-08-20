@@ -5,9 +5,10 @@
 # holds no credential, no sentinel, and not even a CA.
 #
 # Credentials: none, and the upstream is a mock — ADR 0005 says why, and it is
-# GAR's reason. What it proves is everything between the sandbox and Google: the
-# chart's environment, the base URL, the rewrite, the attach, the location pin, and
-# SSE surviving the hop.
+# GAR's reason. What it proves is everything between the sandbox and Google that
+# only a cluster can be wrong about: the chart's environment, the base URL, the
+# rewrite, the attach, and SSE surviving the hop. The refusals are string
+# arithmetic and belong to proxy/vertex_test.go.
 set -euo pipefail
 
 # shellcheck source=lib.sh

@@ -301,96 +301,70 @@ func TestVertexRefusesACallerThatIsNotARun(t *testing.T) {
 	}
 }
 
-// Everything else on the port is what it was before this route existed: a proxy
-// that serves CONNECT. Including `/vertex/…` on a deployment with no Vertex
-// configured — the route exists because a credential does, not because the binary
-// does.
+// What the port serves and what it refuses. Everything that is not the model route
+// is what it was before the route existed: a proxy that serves CONNECT — including
+// `/vertex/…` on a deployment with no Vertex configured, because the route exists
+// because a credential does and not because the binary does.
+//
+// Written onto the connection rather than through http.Client, uniformly, because
+// one of these targets is the *proxied absolute form*: only a proxy-configured
+// client writes it, and net/http will not produce it for a plain Get.
 func TestOnlyTheModelRouteIsServed(t *testing.T) {
-	certs := testCerts(t)
-	resolve := func(context.Context, string) (Run, error) { return testRun, nil }
+	const model = "/vertex/projects/p/locations/global/publishers/anthropic/models/m:rawPredict"
 	for _, tc := range []struct {
-		name, path string
-		vertex     bool
+		name, method, target string
+		vertex               bool
+		want                 int
 	}{
-		{"no Vertex configured", "/vertex/projects/p/locations/global/publishers/anthropic/models/m:rawPredict", false},
-		{"another path entirely", "/healthz", true},
-		{"the prefix without a slash", "/vertex", true},
+		{"no Vertex configured", "POST", model, false, http.StatusNotImplemented},
+		{"another path entirely", "GET", "/healthz", true, http.StatusNotImplemented},
+		{"the prefix without a slash", "GET", "/vertex", true, http.StatusNotImplemented},
+		// Every verb the route forwards is a POST, so anything else is refused here
+		// rather than by Vertex.
+		{"a verb the route does not forward", "GET", model, true, http.StatusMethodNotAllowed},
+		// The sandbox also has `https_proxy` naming this port, so it can address a
+		// request to another host — and one whose path happens to start with the
+		// prefix must not be quietly rerouted into Vertex.
+		{"the proxied absolute form", "POST", "http://elsewhere.test" + model, true, http.StatusNotImplemented},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New(certs, testKey, resolve, nil)
+			reached := false
+			up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+			defer up.Close()
+			px := httptest.NewServer(New(testCerts(t), testKey,
+				func(context.Context, string) (Run, error) { return testRun, nil }, nil))
 			if tc.vertex {
-				v, err := NewVertex(&fakeTS{tok: "ya29.fake"}, "http://unreachable.invalid")
-				if err != nil {
-					t.Fatal(err)
-				}
-				s.Vertex = v
+				px.Close()
+				px = vertexProxy(t, &fakeTS{tok: "ya29.fake"}, up.URL)
 			}
-			px := httptest.NewServer(s)
 			defer px.Close()
-			resp, err := http.Get(px.URL + tc.path)
+
+			req := tc.method + " " + tc.target + " HTTP/1.1\r\nHost: proxy.test\r\n"
+			if tc.method == http.MethodPost {
+				req += "Content-Length: 2\r\n\r\n{}"
+			} else {
+				req += "\r\n"
+			}
+			c, err := net.Dial("tcp", strings.TrimPrefix(px.URL, "http://"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			if _, err := io.WriteString(c, req); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusNotImplemented {
-				t.Errorf("%s answered %d, want 501", tc.path, resp.StatusCode)
+			if resp.StatusCode != tc.want {
+				t.Errorf("%s %s answered %d, want %d", tc.method, tc.target, resp.StatusCode, tc.want)
+			}
+			if reached {
+				t.Error("the request reached Vertex")
 			}
 		})
-	}
-}
-
-// Every verb the route forwards is a POST, so anything else is refused here
-// rather than by Vertex.
-func TestVertexServesPOSTOnly(t *testing.T) {
-	reached := false
-	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
-	defer up.Close()
-	px := vertexProxy(t, &fakeTS{tok: "ya29.fake"}, up.URL)
-	defer px.Close()
-
-	resp, err := http.Get(px.URL + "/vertex/projects/p/locations/global/publishers/anthropic/models/m:rawPredict")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("a GET answered %d, want 405", resp.StatusCode)
-	}
-	if reached {
-		t.Error("a GET reached Vertex")
-	}
-}
-
-// The model route is the base URL the sandbox was handed, in origin form. The
-// sandbox also has `https_proxy` naming this port, so it can send the *proxied*
-// absolute form — and a request it addressed to another host must not be quietly
-// rerouted into Vertex because its path happens to start with the prefix.
-func TestVertexIgnoresProxiedAbsoluteForm(t *testing.T) {
-	reached := false
-	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
-	defer up.Close()
-	px := vertexProxy(t, &fakeTS{tok: "ya29.fake"}, up.URL)
-	defer px.Close()
-
-	c, err := net.Dial("tcp", strings.TrimPrefix(px.URL, "http://"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	// The absolute form, exactly as a client with http_proxy set writes it.
-	if _, err := io.WriteString(c, "POST http://elsewhere.test/vertex/projects/p/locations/global/publishers/anthropic/models/m:rawPredict HTTP/1.1\r\nHost: elsewhere.test\r\nContent-Length: 2\r\n\r\n{}"); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Errorf("the absolute form answered %d, want 501", resp.StatusCode)
-	}
-	if reached {
-		t.Error("a request addressed to another host was rerouted into Vertex")
 	}
 }
 

@@ -77,8 +77,8 @@ The **model route** stage has the same problem and answers it differently, becau
 the part worth watching in a cluster is not the credential: it runs unconditionally
 against a mock Vertex, behind the proxy's `vertex.upstream` seam, and asserts the
 wiring — base URL, path rewrite, a credential arriving on a request that carried
-none, the location pin, and SSE deltas arriving spread out rather than in one
-buffered lump. ADR 0005 says why it is a mock.
+none, and SSE deltas arriving spread out rather than in one buffered lump. ADR
+0005 says why it is a mock, and the refusals are `go test ./proxy`'s.
 
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
 cache and refresh, the GAR attach and the model route's rewrite and streaming — is
