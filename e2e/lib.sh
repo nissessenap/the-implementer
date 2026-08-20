@@ -110,3 +110,46 @@ load_image() {
     kind load docker-image --name implementer-e2e "$1"
   fi
 }
+
+# OpenBao, the networked signer stages 55 and 60 sign the App JWT through. A dev
+# root token the harness invents, exactly like RUN_KEY above: it is a literal
+# because this OpenBao is the harness's own, in-memory, and gone with the pod.
+BAO_TOKEN=${BAO_TOKEN:-e2e-openbao-dev-root-not-a-real-one}
+# Where *the proxy* reaches it — a Service name, so nothing about the cluster's
+# flavour comes into it.
+# shellcheck disable=SC2034  # read by the stages, not by this file
+BAO_SVC=http://openbao:8200
+# Where *the harness* reaches it, which is a different address: the import needs
+# the PEM, the PEM is on this machine, so that half goes through a port-forward.
+# The port is the knob and the URL is built from it, so the two cannot disagree —
+# the port-forward needs the number and the import needs the URL.
+BAO_PORT=${BAO_PORT:-8200}
+BAO_ADDR=http://127.0.0.1:$BAO_PORT
+
+# openbao_up — apply the Deployment, wait for it, put the token where the proxy
+# can read it, and leave a port-forward behind on $BAO_ADDR. Idempotent, so a
+# stage run on its own stands it up and a full run's second stage finds it there.
+openbao_up() {
+  sed -e "s|__TOKEN__|$BAO_TOKEN|" "$E2E_DIR/openbao.yaml" | kubectl apply -n "$NS" -f - >/dev/null
+  kubectl -n "$NS" rollout status deploy/openbao --timeout=180s
+  kubectl -n "$NS" create secret generic openbao-token \
+    --from-literal=token="$BAO_TOKEN" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  # Backgrounded, and killed on the way out — a leaked port-forward makes the
+  # *next* run's health check pass against a dead tunnel.
+  #
+  # ponytail: bash has exactly one EXIT trap, and the whole of the machinery for
+  # sharing it is that $BAO_PF is a global — a stage with litter of its own writes
+  # its own trap and has to remember to kill $BAO_PF in it. Two stages do, and both
+  # are three lines away from this one. A third caller, or a stage that forgets and
+  # leaks the forward, wants a real cleanup stack here.
+  kubectl -n "$NS" port-forward deploy/openbao "$BAO_PORT:8200" >/dev/null 2>&1 &
+  BAO_PF=$!
+  trap 'kill "$BAO_PF" 2>/dev/null || true' EXIT
+  for _ in $(seq 30); do
+    curl -sf --max-time 2 "$BAO_ADDR/v1/sys/health" >/dev/null && return 0
+    sleep 1
+  done
+  echo "!!! FAIL: no OpenBao on $BAO_ADDR after 30s (is the port already in use?)" >&2
+  return 1
+}

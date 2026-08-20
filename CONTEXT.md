@@ -163,8 +163,21 @@ always asks for ghait's boot-time `Check()`, which is what pins the key to ENABL
 and `RSA_SIGN_PKCS1_2048_SHA256` rather than discovering it on the first run.
 Providers are linked in by **build tag** (`make image GO_TAGS=…`), never by a
 blanket underscore import: ghait's provider registry is a global map with no
-identity check, so anything in the binary can shadow a provider. `file` for the
-e2e, `gcp` for production, and production drops `file` outright.
+identity check, so anything in the binary can shadow a provider. `gcp` for
+production, `vault` — Vault or OpenBao transit, wire-identical — for the e2e, and
+both drop `file` outright: the e2e signs over the network too, so the App key
+never enters the cluster in either.
+
+Signing over the network is the property the e2e is buying there, and OpenBao is
+what makes it affordable: transit needs no cloud credential, so the stage runs on
+every pull request and the self-hosted operator story is demonstrated rather than
+claimed. Two known edges. Transit must **import**, like KMS, and OpenBao ships no
+`bao transit import` — `e2e/transit-import.sh` is that helper, against the raw API.
+And ghait v0.14.0 strips a hardcoded `vault:v1:` from the signature, so a *rotated*
+transit key returns `vault:v2:…` and the prefix lands inside the JWT's signature
+segment: every mint fails closed, an outage rather than a bypass, and the fix
+belongs upstream rather than here. Nothing rotates in dev mode, and stage 55 asserts the prefix it gets
+is the prefix ghait strips.
 
 **Run identity** — `owner`, `repo`, `issue` and `run-uid` in **annotations**
 (prefixed `implementer.dev/`), not labels,

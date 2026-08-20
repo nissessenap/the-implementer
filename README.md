@@ -69,6 +69,16 @@ invents. The exceptions skip themselves unless they are given one:
   GitHub hands out) and `E2E_GITHUB_REPO` the App is installed on, plus an
   optional `E2E_GITHUB_OTHER_REPO` for the negative clone.
 
+The **signer** is the stage in between, and it needs nothing: OpenBao runs in the
+cluster in dev mode, the App JWT is signed through its transit engine, and so the
+signature crosses the network exactly as it does from KMS in production — the one
+link a PEM on disk cannot exercise. It imports a key it generates and throws away,
+verifies the signature against it, and then boots the proxy on `provider: vault`
+so ghait's own check runs from inside the cluster. When the minted-token stage
+above does have an App, it signs the same way, through the same OpenBao: the App
+key is read on the harness's machine and imported, so it never reaches the cluster
+at all.
+
 There is deliberately no GAR stage: the proxy's Google identity is Workload
 Identity, so a cluster with no metadata server cannot turn it on, and
 `proxy/gar_test.go` proves the attach and the `-docker.pkg.dev` exclusion offline.

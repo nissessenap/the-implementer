@@ -5,6 +5,10 @@ go 1.26.0
 require (
 	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/google/go-github/v88 v88.0.0
+	// Do not bump without reading the vault provider: v0.14.0 strips a hardcoded
+	// `vault:v1:` from a transit signature, so a rotated key breaks every mint.
+	// proxy/mint_vault_test.go fails when that is fixed, which is the signal to
+	// delete the rotation warning in charts/proxy/values.yaml.
 	github.com/isometry/ghait v0.14.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/time v0.15.0
