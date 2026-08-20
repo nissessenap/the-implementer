@@ -10,17 +10,17 @@ repeated. Every kagent claim below cites a file and line.
 diagnose it and, when the fix is small, open a pull request. What runs where,
 what holds the state, and does any of it want to be an agent platform?
 
-**Answer.** One orchestrator, two channels, one Job per attempt, no agent
-platform and no A2A. Slack carries attention, the **GitHub issue carries state**,
-and the orchestrator stays stateless — its database is the issue body.
+**Answer.** One orchestrator, two channels, one Job per attempt, no agent platform
+and no A2A. Slack carries attention, the **GitHub issue carries state**, and the
+orchestrator stays stateless — its database is the issue body.
 
 Two claims carry the design:
 
-1. **§2 — deterministic work belongs to the orchestrator.** An alert does not name
-   a repository, and finding it is a lookup, not a judgement. The orchestrator
-   fingerprints, dedups, resolves the repo, pulls the surrounding metrics with
-   fixed queries, and writes all of it into an issue *before* any model runs. The
-   agent starts from an enriched issue, never from a raw alert.
+1. **§2 — the split is "does it need to execute code", not "is it AI".** The
+   orchestrator diagnoses the alert itself, with a model and the Grafana MCP, in
+   its own process: that work needs no filesystem, no toolchain and no sandbox, so
+   it needs no pod. Only reading a codebase and running its tests needs a Job. The
+   agent in the Job therefore starts from a diagnosed issue, never a raw alert.
 2. **§5 — an issue is a durable A2A session with better properties.** Idle costs
    nothing because no process is held, `input-required` is a label rather than a
    suspended VM, and a human can read and edit the transcript.
@@ -33,11 +33,11 @@ Two claims carry the design:
   Grafana ── alert ──▶ #alerts (Slack) ──┐
                                          │
   ┌──────────────────────────────────────┴──────────────────────────────────┐
-  │  ORCHESTRATOR — stateless Go. No DB. No LLM. All of this is code.       │
+  │  ORCHESTRATOR — stateless Go. No DB. Holds credentials, keeps no state. │
   │                                                                         │
-  │   ① FINGERPRINT      alertname + chosen labels → sha256                 │
+  │   ① FINGERPRINT      alertname + chosen labels → sha256      [code]     │
   │                                                                         │
-  │   ② DEDUP            gh issue list --label alert --search <fp>          │
+  │   ② DEDUP            gh issue list --label alert --search <fp>  [code]  │
   │                          │                                              │
   │                    ┌─────┴─────┐                                        │
   │                  hit         miss                                        │
@@ -47,34 +47,42 @@ Two claims carry the design:
   │              │  STOP    │◀─────┼───┘   thread, bump a count. No Job.    │
   │              └──────────┘      │                                        │
   │                                ▼                                        │
-  │   ③ RESOLVE REPO     alert labels (service/namespace/job)               │
-  │                      ──▶ static map ──▶ owner/repo                      │
+  │   ③ DIAGNOSE                                          [model + MCP]    │
+  │      ┌───────────────────────────────────────────────────────────┐      │
+  │      │  in-process agent loop.  Grafana MCP only.                │      │
+  │      │  No clone, no toolchain, no code execution → no pod.      │      │
+  │      │                                                           │      │
+  │      │  it decides what to ask: which rule fired and why, error  │      │
+  │      │  rate and latency around the window, log patterns, pod    │      │
+  │      │  restarts / OOM, recent deploys, a trace exemplar —       │      │
+  │      │  chosen per alert, not from a fixed list.                 │      │
+  │      │                                                           │      │
+  │      │  structured_output: {summary, probable_cause, service,    │      │
+  │      │                      signals[], confidence}               │      │
+  │      └───────────────────────────────────────────────────────────┘      │
+  │                                                                         │
+  │   ④ RESOLVE REPO     service (from ③) → static map → owner/repo [code]  │
   │                      no match ──▶ needs-human, stop                     │
   │                                                                         │
-  │   ④ ENRICH           Grafana HTTP API, fixed queries, no model:         │
-  │                        · the firing rule + its expression               │
-  │                        · error rate / latency around the window         │
-  │                        · pod restarts, OOM kills, recent deploys        │
-  │                        · top log patterns for the service               │
-  │                        · trace exemplar if one exists                   │
-  │                                                                         │
-  │   ⑤ OPEN THE ISSUE   in the resolved repo. Body carries:                │
+  │   ⑤ OPEN THE ISSUE   in the resolved repo. Body carries:        [code]  │
   │                        fingerprint · slack thread_ts · alert payload    │
-  │                        · everything ④ found · the time window           │
-  │                      label: alert, triaged                              │
+  │                        · the whole of ③ · the time window              │
+  │                      label: alert, diagnosed                            │
   │                                                                         │
-  │   ⑥ POST TO SLACK    thread reply: what fired, where, issue link        │
+  │   ⑥ POST TO SLACK    thread reply: what fired, the diagnosis,   [code]  │
+  │                      the issue link                                     │
   │                                                                         │
-  │   ⑦ CREATE THE JOB   one Job, arg = issue number                        │
+  │   ⑦ CREATE THE JOB   one Job, arg = issue number                [code]  │
   └────────────────────────────────┬────────────────────────────────────────┘
                                    │
                                    ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
   │  JOB — gVisor · uid 1000 · zero credentials · backoffLimit 0            │
   │                                                                         │
-  │   phase A  FEASIBILITY   read the enriched issue, clone, read the code. │
-  │                          Follow up in Grafana MCP if it needs to.       │
-  │                          Emit structured_output:                        │
+  │   phase A  FEASIBILITY   read the diagnosed issue, clone, read the      │
+  │                          code against the symptoms. Follow up in        │
+  │                          Grafana MCP where the code raises a question.  │
+  │                          structured_output:                             │
   │                            {feasible, difficulty, plan, confidence}     │
   │                              │                                          │
   │                    ┌─────────┴─────────┐                                │
@@ -97,38 +105,36 @@ Two claims carry the design:
         posts the link to Slack        commits exist on the branch
 ```
 
-One Job, two phases inside it. The feasibility verdict happens after the clone,
-so a "no" pays the pod and the checkout — which is the right trade while the
-enrichment is already done and the model only needs a few turns to answer. Split
-it into two Jobs the day the discarded clone cost becomes visible; nothing else
-in the design changes.
+One Job with two phases, not two Jobs. The feasibility verdict lands after the
+clone, so a "no" pays the pod and the checkout — acceptable while the diagnosis is
+already done and the model needs few turns to answer. Split it the day the
+discarded clone cost becomes visible; nothing else changes.
 
-## 2. The split: deterministic in the orchestrator, judgement in the Job
+## 2. The split: does it need to execute code?
 
-The governing rule. Anything with a correct answer that code can compute belongs
-in the orchestrator, where it is cheap, testable, and identical every time.
+The axis is not "deterministic versus AI". Deciding what to ask Grafana about an
+alert nobody has seen before is judgement, and no static query list covers it.
+The axis is **what the work needs around it**:
 
-| Step | Where | Why |
-| --- | --- | --- |
-| Fingerprint an alert | orchestrator | a hash |
-| Is this already open? | orchestrator | an API query |
-| Which repo is this? | orchestrator | label → static map. A model would *guess* |
-| Pull the metric context | orchestrator | fixed PromQL/LogQL. Same alert, same queries |
-| Open / label / comment | orchestrator | API calls |
-| Reply into the right Slack thread | orchestrator | `thread_ts` off the issue body |
-| Open the PR | orchestrator | it knows branch, issue and run result |
-| Is this fixable, and how hard? | Job | reads code against symptoms. Judgement |
-| Which line is wrong | Job | judgement |
-| Write the test and the fix | Job | judgement |
-| Follow-up metric questions mid-fix | Job | open-ended, so MCP not fixed queries |
+| | Needs | Where | Examples |
+|---|---|---|---|
+| **Code** | nothing | orchestrator, inline | fingerprint, dedup query, issue/label/comment CRUD, `thread_ts` routing, service→repo map, opening the PR, creating the Job |
+| **Judgement, no execution** | a model + Grafana | orchestrator, **in-process agent loop** | what is this alert, what to query, what is the probable cause, which service |
+| **Judgement, needs execution** | a filesystem, a toolchain, network | **Job**, gVisor, one per attempt | read the codebase, is this fixable, write the test, write the fix, run the suite, push |
 
-Note the consequence for tooling: **the orchestrator uses the Grafana HTTP API,
-not the Grafana MCP.** MCP exists so a model can choose its own queries. The
-orchestrator's queries are chosen at compile time, so MCP would be a protocol tax
-on a fixed request. The Job gets the MCP, for exactly the open-ended half.
+The middle row is the one that surprises. An agent loop that only calls
+read-only MCP tools executes no untrusted code, touches no working tree, and
+finishes in seconds. A pod would buy it nothing but an image pull. So it runs
+inside the orchestrator process, and the orchestrator holds a model key alongside
+the GitHub App key and the Slack token — it is the trusted component either way.
 
-The other consequence: the orchestrator now holds a Grafana read credential. It
-still holds no model credential and never calls an LLM.
+The bottom row is where a sandbox earns its keep, because that is where arbitrary
+repository code gets read, built and run.
+
+**Both agent legs get the Grafana MCP, for different reasons.** In the
+orchestrator it is the whole toolset — signals are all there is. In the Job it is
+the second half of a pair: the agent has the code *and* the signals, so when the
+code raises a question the metrics can answer it without a handoff.
 
 ## 3. Who talks to what
 
@@ -139,12 +145,13 @@ still holds no model credential and never calls an LLM.
   │   in ◀── Slack Events API      alert messages, thread replies           │
   │   in ◀── GitHub webhooks       issue comments, PR reviews                │
   │                                                                         │
-  │  out ──▶ Grafana HTTP API      fixed enrichment queries  (read-only)    │
+  │  out ──▶ Grafana MCP           the diagnose loop's only toolset         │
+  │  out ──▶ Anthropic API         the diagnose loop itself                 │
   │  out ──▶ Slack Web API         chat.postMessage — attention only        │
   │  out ──▶ GitHub API            issues, labels, comments, PRs — state    │
   │  out ──▶ Kubernetes API        create Job, watch Pod                    │
   │                                                                         │
-  │  holds: a Grafana token, a GitHub App key, a Slack token. No model key. │
+  │  holds: model key, Grafana token, GitHub App key, Slack token.          │
   │  keeps: nothing. State is in the issue.                                 │
   └─────────────────────────────────────────────────────────────────────────┘
                                     │ creates one Job per attempt
@@ -152,7 +159,7 @@ still holds no model credential and never calls an LLM.
   ┌─────────────────────────────────────────────────────────────────────────┐
   │  JOB POD   gVisor · uid 1000 · zero credentials · backoffLimit 0        │
   │                                                                         │
-  │   claude -p  ──MCP──▶  Grafana MCP        open-ended follow-up          │
+  │   claude -p  ──MCP──▶  Grafana MCP        signals, beside the code      │
   │             ──MCP──▶  GitHub MCP (RO)     issue thread, code search     │
   │             ──git──▶  github.com          clone, push  (sentinel cred)  │
   │             ──▶ Maven Central / GAR / internal Nexus   dependencies     │
@@ -162,11 +169,16 @@ still holds no model credential and never calls an LLM.
   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**One agent, not a diagnose-then-hand-off pair.** A handoff pays a lossy
-translation at the seam: the second agent receives prose about what the first one
-saw and cannot go back and ask another question once it is reading code. One
-process holding both the metrics and the working tree can re-query mid-fix. That
-deletes the A2A leg, the second image, and the context transfer.
+Note the asymmetry, and that it is deliberate: the **orchestrator holds its
+credentials directly** because it is trusted code we wrote, while the **Job holds
+none** because it runs a model over repository content. The proxy exists for the
+second case only.
+
+**One agent per side, no diagnose-then-hand-off chain inside the Job.** The
+handoff that does exist — orchestrator → issue → Job — is lossy on purpose and
+survivable, because it is written down: the Job reads the diagnosis as text and
+can re-query Grafana itself if the text is not enough. A live agent-to-agent
+handoff would be lossy *and* ephemeral.
 
 **GitHub MCP read-only for reading, git CLI for writing.** The hosted GitHub MCP
 scopes by URL path — `…/x/repos/readonly` versus `…/x/repos` versus
@@ -181,7 +193,7 @@ Verification is in [kagent-as-the-control-plane][kagentdoc]; the short form,
 because it is the same handful of facts every time:
 
 | Needed | Job | kagent actor |
-| --- | --- | --- |
+|---|---|---|
 | Terminal state to act on | exit code + `/dev/termination-log` | none. Suspends when the response body closes (`substrate_sandbox_transport.go:100-108`) |
 | Per-run resources | pod requests/limits | **`ActorTemplateSpec` has none.** Resources live on the pooled worker only |
 | Concurrency | scheduler is the admission control | fixed `WorkerPool.Replicas`, no HPA (`substrate/pkg/api/v1alpha1/workerpool_types.go:57-61`) |
@@ -208,12 +220,17 @@ Recorded so nobody tries it: **the kagent agent image is not standalone.**
 call the controller back for sessions. Taking the image means taking the
 controller, and since v0.8 that means Postgres.
 
+Nothing above argues against kagent for a *long-lived read agent* — that is what
+it is good at. It argues that the write half is not an actor, and that once the
+diagnose loop is 200 lines of in-process agent SDK with one MCP server attached,
+there is no second consumer left to justify the control plane.
+
 ## 5. The issue is a durable A2A session
 
 The reframe that removes the last reason to want a protocol here.
 
 | A2A concept | Issue equivalent |
-| --- | --- |
+|---|---|
 | `contextId` | issue number |
 | message | comment |
 | task state | label |
@@ -231,12 +248,12 @@ expires; here the run exits, a human comments three days later, and the next run
 reads the whole thread as context. The pause is free and auditable.
 
 **The issue body is the database.** It carries the fingerprint, the Slack
-`thread_ts`, and the enrichment from §1④, which makes every hard problem a lookup:
+`thread_ts` and the §1③ diagnosis, which makes every hard problem a lookup:
 
 ```
   dedup            gh issue list --label alert --search "<fingerprint>"
   reply routing    thread_ts read off the issue body
-  status           labels: triaged / needs-human / implementing / pr-open
+  status           labels: alert / diagnosed / needs-human / pr-open
   agent input      the issue body itself — no separate payload to pass
 ```
 
@@ -250,24 +267,25 @@ human conversation.** A Job is 30–90 s to first token — image pull, JVM star
 clone. Fine for "assess this". Wrong for someone typing *"@bot what about the
 retry config?"* into the thread and expecting an answer.
 
-So: **batch turns → Job. Conversational turns → warm process.** The whole
-enrich → assess → fix flow is batch turns. If a chatty surface is ever wanted it
-is a separate warm reader over the same issue — read-only, no toolchain, no push —
-and not the thing that writes the fix.
+Note that the §1③ diagnose loop already sidesteps this by being in-process: it
+answers in seconds because it never waits for a pod. So the latency problem is
+confined to the code-reading half, which is exactly the half nobody expects to be
+conversational. **Batch turns → Job. Conversational turns → in-process.**
 
 ## 7. What this does not solve
 
-1. **The label → repo map.** §1③ is now the orchestrator's job and it is the
-   weakest link: a map from Grafana `service`/`namespace`/`job` labels to
-   `owner/repo`, maintained by hand, wrong whenever a service is renamed. No
-   match must mean `needs-human`, never a guess — a guessed repo spends a whole
-   run on the wrong codebase. Where the map should live is undecided.
+1. **The service → repo map.** §1④ turns the diagnosis's `service` into a
+   repository by hand-maintained lookup, and it is the weakest link: wrong
+   whenever a service is renamed, and silent about services it has never heard of.
+   No match must mean `needs-human`, never a guess — a guessed repo spends a whole
+   run on the wrong codebase. Where the map lives is undecided; a Backstage-style
+   catalog or a label on the k8s workload are both plausible and neither is chosen.
 2. **Fingerprint stability.** Two alerts a human calls "the same problem" can
    differ in labels, and a flapping alert can produce a new fingerprint each time.
    Dedup is only as good as the fingerprint and nothing here proposes a good one.
-3. **Which enrichment queries.** §1④ lists a plausible set. Nothing has been
-   measured, and an over-stuffed issue body costs input tokens on every run
-   while an under-stuffed one sends the agent back to Grafana anyway.
+3. **How much diagnosis to write down.** §1③ emits into the issue body, which
+   every later run pays for in input tokens. Too little and the Job re-queries
+   Grafana anyway; too much and every retry carries the weight. Unmeasured.
 4. **Internal dependency access.** Resolving from a private Nexus or Artifactory
    is a third credential shape beside git-basic and `token`/`Bearer`, and it must
    reach the resolver without reaching the sandbox. Unbuilt.
@@ -276,9 +294,14 @@ and not the thing that writes the fix.
    same path as any other change — the agent edits the gitops repo and opens a PR
    — so it stays diffable and reviewable. An agent with live cluster write access
    to mitigate a problem it diagnosed itself has no reviewer.
-6. **Cost of a run on noise.** Every new fingerprint spends a Job. Nothing here
-   rate-limits, and a flapping alert with an unstable fingerprint is a spending
-   loop. A per-hour budget on new runs is the obvious guard and is not designed.
+6. **Cost of a run on noise.** Every new fingerprint spends a diagnose loop and a
+   Job. Nothing here rate-limits, and a flapping alert with an unstable
+   fingerprint is a spending loop. A per-hour budget is the obvious guard and is
+   not designed.
+7. **The orchestrator now runs a model, so it can fail like one.** A diagnose loop
+   that hallucinates a service name feeds §1④ garbage. `confidence` in the
+   structured output is the intended guard; what threshold routes to `needs-human`
+   is not set.
 
 ---
 [kagent]: https://github.com/kagent-dev/kagent
