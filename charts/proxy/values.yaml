@@ -83,8 +83,8 @@ githubApp:
 #     a service account key in a Secret is the long-lived credential Workload
 #     Identity exists to delete, and this chart offers nowhere to put one. A
 #     cluster with no metadata server therefore cannot turn this on — which is why
-#     the kind/k3s e2e proves the mechanism with a fake token source in `go test`
-#     rather than with a credential (see proxy/gar_test.go).
+#     the mechanism is proved with a fake token source in `go test` rather than
+#     with a credential (see proxy/gar_test.go), and there is no e2e stage for it.
 gar:
   enabled: false
 

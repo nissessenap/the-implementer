@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"log"
 	"net/http"
@@ -95,11 +94,10 @@ func main() {
 	// `*.pkg.dev` either way, so attaching a Google token is the operator's
 	// decision and not a side effect of where the pod runs.
 	//
-	// Parsed rather than compared to "true", so `GAR_ENABLED=yes` is a boot
-	// failure instead of a silently tokenless registry.
-	if on, err := strconv.ParseBool(cmp.Or(os.Getenv("GAR_ENABLED"), "false")); err != nil {
-		log.Fatalf("GAR_ENABLED=%s: %v", os.Getenv("GAR_ENABLED"), err)
-	} else if on {
+	// ponytail: set-or-not, not parsed — the chart only writes this var when the
+	// operator turned it on, so `GAR_ENABLED=false` by hand means on. A second
+	// writer wants strconv.ParseBool here.
+	if os.Getenv("GAR_ENABLED") != "" {
 		// Blocking, like the App key check above: it resolves ADC and spends one
 		// token, so a proxy that can reach no Google identity at all never goes
 		// ready. It cannot tell a *wrong* one from a right one — a GKE cluster

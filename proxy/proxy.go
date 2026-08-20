@@ -267,11 +267,9 @@ func (s *Server) serve(c net.Conn, authority string, run Run) {
 				_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 				return
 			case swapped:
-				// Per shape, because this is the one place an operator goes to
-				// check whether the swap happened: the GAR credential attaches
-				// one where the sandbox sent nothing at all, and calling that a
-				// swap would be a lie exactly where it costs the most.
-				log.Printf("%s: %s the %q credential", host, cred.verb(), cred.Name)
+				// "attached" covers both shapes: a sentinel swapped for the real
+				// thing, and a GAR bearer put on a request that carried nothing.
+				log.Printf("%s: attached the %q credential", host, cred.Name)
 			}
 		}
 

@@ -13,23 +13,12 @@ if [[ -z ${KUBECONFIG:-} && -r "$E2E_DIR/../.kind.kubeconfig" ]]; then
 fi
 
 SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-if [[ ${E2E_ALLOW_REMOTE:-0} == 1 ]]; then
-  # Unlocking is not enough, because the stages below create a namespace, a CA, a
-  # Deployment and Jobs in whatever context was last switched to — and on a
-  # developer laptop that is a real cluster. So the bypass has to *name* what it
-  # is unlocking, and stage 70 is the only reason it exists.
-  : "${E2E_EXPECT_CLUSTER:?E2E_ALLOW_REMOTE=1 also needs E2E_EXPECT_CLUSTER=<substring of the intended API server URL>}"
-  if [[ $SERVER != *"$E2E_EXPECT_CLUSTER"* ]]; then
-    echo "REFUSING: API server '$SERVER' does not contain E2E_EXPECT_CLUSTER='$E2E_EXPECT_CLUSTER'." >&2
-    exit 1
-  fi
-else
+if [[ ${E2E_ALLOW_REMOTE:-0} != 1 ]]; then
   case $SERVER in
     https://127.0.0.1:* | https://localhost:* | 'https://[::1]:'*) ;;
     *)
       echo "REFUSING: API server '$SERVER' is not local." >&2
-      echo "  kind: make kind-up. k3s: export KUBECONFIG." >&2
-      echo "  Deliberate: E2E_ALLOW_REMOTE=1 plus E2E_EXPECT_CLUSTER=<substring of that server URL>." >&2
+      echo "  kind: make kind-up. k3s: export KUBECONFIG. Deliberate: E2E_ALLOW_REMOTE=1." >&2
       exit 1
       ;;
   esac

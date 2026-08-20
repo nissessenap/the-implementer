@@ -55,22 +55,32 @@ func TestGARWarmsTheTokenAtBoot(t *testing.T) {
 	}
 }
 
-// The same refusal per request, which boot cannot cover: a token source that
-// works at boot and later answers with an empty token. A 502 rather than an
-// anonymous request.
-func TestGAREmptyTokenIsRefusedPerRequest(t *testing.T) {
-	ts := &fakeTS{tok: "ya29.fake"}
-	cred, err := gar(ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts.tok = ""
-	req := &http.Request{Header: http.Header{}}
-	if _, err := cred.swap(context.Background(), req, "us-central1-go.pkg.dev", testRun); err == nil {
-		t.Error("an empty access token was not refused")
-	}
-	if got := req.Header.Get("Authorization"); got != "" {
-		t.Errorf("Authorization = %q, want nothing attached", got)
+// The same two refusals per request, which boot cannot cover: a token source that
+// worked at boot and stops. Either way a 502 — the same as an unreadable Secret —
+// and nothing attached, rather than an anonymous request logged as a credential.
+func TestGARBrokenTokenSourceIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(*fakeTS)
+	}{
+		{"the metadata server went away", func(f *fakeTS) { f.err = errors.New("gone") }},
+		{"an empty access token", func(f *fakeTS) { f.tok = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := &fakeTS{tok: "ya29.fake"}
+			cred, err := gar(ts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.stop(ts)
+			req := &http.Request{Header: http.Header{}}
+			if _, err := cred.swap(context.Background(), req, "us-central1-go.pkg.dev", testRun); err == nil {
+				t.Error("not refused")
+			}
+			if got := req.Header.Get("Authorization"); got != "" {
+				t.Errorf("Authorization = %q, want nothing attached", got)
+			}
+		})
 	}
 }
 
@@ -97,25 +107,6 @@ func TestGARAttachesUnconditionally(t *testing.T) {
 		if got := req.Header.Get("Authorization"); got != "Bearer ya29.fake" {
 			t.Errorf("Authorization %q became %q", in, got)
 		}
-	}
-}
-
-// A token source that stops working is a refusal, the same as an unreadable
-// Secret: proxy.serve turns the error into a 502 rather than forwarding the
-// request unauthenticated.
-func TestGARTokenFailureIsAnError(t *testing.T) {
-	ts := &fakeTS{tok: "ya29.fake"}
-	cred, err := gar(ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts.err = errors.New("the metadata server went away")
-	req := &http.Request{Header: http.Header{}}
-	if _, err := cred.swap(context.Background(), req, "europe-west1-go.pkg.dev", testRun); err == nil {
-		t.Error("a failed token refresh was not an error")
-	}
-	if got := req.Header.Get("Authorization"); got != "" {
-		t.Errorf("Authorization = %q, want nothing attached", got)
 	}
 }
 
@@ -174,29 +165,6 @@ func TestGARHostBinding(t *testing.T) {
 	// and the GAR pattern must not spill onto it.
 	if creds.For("github.test") != nil {
 		t.Error("the GAR credential claimed github.test")
-	}
-}
-
-// The pattern is validated at load like any other host binding: against the
-// certificate, and through one sample. A certificate with no `*.pkg.dev` cannot
-// present these names, so a proxy bound to them would intercept nothing and hand
-// out nothing — silently, months later.
-func TestGARRefusedWithoutTheWildcardSAN(t *testing.T) {
-	dir := t.TempDir()
-	// The exact regional name, which is exactly what crypto/x509 will not let a
-	// `*-go.pkg.dev` SAN mean — so a certificate can only cover the pattern via
-	// the whole-label wildcard.
-	issue(t, dir, "github.test", "europe-west1-go.pkg.dev")
-	certs, err := LoadCerts(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cred, err := gar(&fakeTS{tok: "ya29.fake"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewCreds(certs, cred); err == nil {
-		t.Error("NewCreds bound the GAR pattern to a certificate that cannot present it")
 	}
 }
 

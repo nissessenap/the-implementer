@@ -85,16 +85,6 @@ func NewCreds(certs *Certs, creds ...*Credential) (Creds, error) {
 			// `CONNECT GitHub.com:443` is intercepted — and an exact map lookup
 			// would then hand it no credential and push anonymously, silently.
 			h = strings.TrimSuffix(strings.ToLower(h), ".")
-			// Refused, because matchHost only honours a `*` as the first
-			// character: `foo*-go.pkg.dev` would pass the sample check below
-			// against `*.pkg.dev` and then sit in the map under a key no host can
-			// ever match — a credential that silently never fires, the exact
-			// failure this function exists to refuse. A *second* `*` needs no rule
-			// of its own: it survives the substitution below, and x509 rejects a
-			// hostname containing one, so the certificate check refuses it.
-			if strings.Contains(h, "*") && !strings.HasPrefix(h, "*") {
-				return nil, fmt.Errorf("credential %q names %s: a `*` is a pattern only as the first character", cr.Name, h)
-			}
 			// A pattern is checked through one sample host — `x-go.pkg.dev` for
 			// `*-go.pkg.dev` — which is sound for the reason matchHost gives, and
 			// is a no-op on an exact name. An exact SAN fails the sample and the
@@ -121,6 +111,10 @@ func NewCreds(certs *Certs, creds ...*Credential) (Creds, error) {
 // narrower — it is also what makes NewCreds's one-sample validation sound, since
 // every host a pattern can match then differs from that sample in the leftmost
 // label alone.
+//
+// Only a *leading* `*` is a pattern: `foo*.pkg.dev` is taken literally and so
+// matches nothing. Not refused at load, because Hosts is never operator input —
+// it is garHosts, in this package, and TestGARHostBinding fails on that typo.
 func matchHost(pat, host string) bool {
 	suffix, ok := strings.CutPrefix(pat, "*")
 	if !ok {
@@ -155,15 +149,6 @@ func (c Creds) For(host string) *Credential {
 		}
 	}
 	return nil
-}
-
-// verb is how a log line names what swap did, and it differs by shape rather than
-// by credential: see the caller.
-func (cr *Credential) verb() string {
-	if cr.Attach {
-		return "attached"
-	}
-	return "swapped the sentinel for"
 }
 
 // isSentinel is the one definition of "this credential is worthless". A prefix

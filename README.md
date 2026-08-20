@@ -58,7 +58,7 @@ thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
 else via `E2E_IMAGE_LOAD` (a command taking the image name).
 
-Stages run in filename order, and every stage but the last three needs no real
+Stages run in filename order, and every stage but the last two needs no real
 credential of any kind, so the whole thing runs on fork pull requests too — the
 run secret the proxy authenticates against is derived from a key the harness
 invents. The exceptions skip themselves unless they are given one:
@@ -67,20 +67,15 @@ invents. The exceptions skip themselves unless they are given one:
   repository it may push a dry run against;
 - the **minted token** wants `E2E_GITHUB_APP_ID`, `E2E_GITHUB_APP_KEY` (the PEM
   GitHub hands out) and `E2E_GITHUB_REPO` the App is installed on, plus an
-  optional `E2E_GITHUB_OTHER_REPO` for the negative clone;
-- **GAR injection** wants `E2E_GAR_INDEX` and `E2E_GAR_PACKAGE`, a private wheel
-  it may install. It also wants a proxy that can reach a metadata server, because
-  the Google identity is Workload Identity and there is nowhere to mount a key —
-  so on kind and k3s this one stays skipped by construction. Reaching a real
-  cluster needs `E2E_ALLOW_REMOTE=1` *and* `E2E_EXPECT_CLUSTER`, a substring of
-  the API server URL you meant: unlocking the local-only guard without naming
-  what it unlocks is how the harness ends up installing into a production
-  context.
+  optional `E2E_GITHUB_OTHER_REPO` for the negative clone.
+
+There is deliberately no GAR stage: the proxy's Google identity is Workload
+Identity, so a cluster with no metadata server cannot turn it on, and
+`proxy/gar_test.go` proves the attach and the `-docker.pkg.dev` exclusion offline.
 
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
-cache and refresh, and the GAR attach against a fake token source — is covered
-offline by `go test ./proxy`. Adding a
-stage is adding a file to [`e2e/`](e2e/).
+cache and refresh, and the GAR attach — is covered offline by `go test ./proxy`.
+Adding a stage is adding a file to [`e2e/`](e2e/).
 
 ## Roadmap
 

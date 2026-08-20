@@ -45,30 +45,15 @@ E2E_GITHUB_APP_ID=… E2E_GITHUB_APP_KEY=~/.secrets/app.pem \
   E2E_GITHUB_REPO=me/scratch E2E_GITHUB_OTHER_REPO=me/other-private ./e2e/60-github-mint.sh
 ```
 
-Stage 70 (GAR) is skipped on kind and k3s **by construction**, not by choice: the
-proxy's Google identity is Workload Identity and the chart offers nowhere to mount
-a service account key, so a cluster with no metadata server cannot turn it on. Do
-not add one — `proxy/gar_test.go` proves the same path (attach on
-`-python.pkg.dev`, tokenless on `-docker.pkg.dev`, through a real interception)
-against a fake token source, which is what runs locally and in CI.
+There is no GAR e2e stage, deliberately: the proxy's Google identity is Workload
+Identity and the chart offers nowhere to mount a service account key, so a cluster
+with no metadata server cannot turn it on. Do not add one — `proxy/gar_test.go`
+proves the same path (attach on `-python.pkg.dev`, tokenless on `-docker.pkg.dev`,
+through a real interception) against a fake token source, which is what runs
+locally and in CI.
 
-Against GKE, where it can run — the whole harness, because stage 70 upgrades the
-release the earlier stages installed rather than installing one itself:
-
-`E2E_ALLOW_REMOTE=1` alone is refused: it also needs `E2E_EXPECT_CLUSTER`, a
-substring of the API server URL you meant. `make e2e` installs a namespace, a CA
-and a Deployment into whatever context is current, and on this laptop that is a
-production cluster unless something names the one you intended.
-
-```sh
-E2E_ALLOW_REMOTE=1 E2E_EXPECT_CLUSTER=my-sandbox-cluster \
-  E2E_GAR_INDEX=https://europe-west1-python.pkg.dev/proj/repo/simple/ \
-  E2E_GAR_PACKAGE=my-private-package E2E_GAR_GSA=proxy@proj.iam.gserviceaccount.com \
-  make e2e
-```
-
-Check the proxy log names the identity you meant: with no Workload Identity binding
-the metadata server hands out the *node pool's* service account and everything
-works, which is the one way to get this wrong invisibly.
+Against a real cluster, check the proxy log names the identity you meant: with no
+Workload Identity binding the metadata server hands out the *node pool's* service
+account and everything works, which is the one way to get this wrong invisibly.
 
 That service account needs `roles/artifactregistry.reader` and nothing else new.

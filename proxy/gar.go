@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"golang.org/x/oauth2"
@@ -24,11 +23,6 @@ import (
 // intercepted and tokenless — which is the whole reason the credential rule is
 // narrower than the `*.pkg.dev` certificate rather than read off it.
 var garHosts = []string{"*-go.pkg.dev", "*-python.pkg.dev"}
-
-// garScope is cloud-platform because that is the scope a GKE metadata token comes
-// back with anyway; the *authorization* is `roles/artifactregistry.reader` on the
-// proxy's Google service account, which is where to narrow this.
-const garScope = "https://www.googleapis.com/auth/cloud-platform"
 
 // GAR is the Artifact Registry credential: the proxy's own Google identity, as a
 // plain bearer, on the Go and Python endpoints.
@@ -74,15 +68,11 @@ func GAR(ctx context.Context) (*Credential, error) {
 	if email, err := metadata.EmailWithContext(ctx, "default"); err == nil {
 		log.Printf("creds: the proxy's Google identity is %s — if that is a node pool's default service account, Workload Identity is not bound", email)
 	}
+	// cloud-platform because that is the scope a GKE metadata token comes back
+	// with anyway; the *authorization* is `roles/artifactregistry.reader` on the
+	// proxy's Google service account, which is where to narrow this.
 	creds, err := google.FindDefaultCredentialsWithParams(ctx, google.CredentialsParams{
-		Scopes: []string{garScope},
-		// Set explicitly, because the default is *zero* — which falls back to a
-		// 10-second margin and would hand out tokens with seconds left on them.
-		// 3m45s is what x/oauth2's own ComputeTokenSource uses, for its reason:
-		// the metadata server's cache is at least four minutes, so refreshing
-		// earlier than this buys nothing and refreshing later cuts it fine. Only
-		// the metadata path reads this field, which is the only path we support.
-		EarlyTokenRefresh: 225 * time.Second,
+		Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("no Application Default Credentials: %w", err)
@@ -93,20 +83,7 @@ func GAR(ctx context.Context) (*Credential, error) {
 // gar is GAR with the token source injected, which is how the test gets one
 // without a Google to ask.
 func gar(ts oauth2.TokenSource) (*Credential, error) {
-	tok, err := ts.Token()
-	if err != nil {
-		return nil, fmt.Errorf("Google token: %w", err)
-	}
-	// The same refusal as Token below, and here for the reason the doc comment
-	// gives: boot exists so an *unusable* credential kills the pod, and a token
-	// source answering with no error and no token is unusable. `err == nil` is
-	// not the whole of "it works".
-	if tok.AccessToken == "" {
-		return nil, fmt.Errorf("the Google token source returned an empty access token")
-	}
-	log.Printf("creds: attaching the proxy's own Google identity to %v (first token expires %s)",
-		garHosts, tok.Expiry.UTC().Format(time.RFC3339))
-	return &Credential{
+	cred := &Credential{
 		Name:   "gar",
 		Hosts:  garHosts,
 		Attach: true,
@@ -121,7 +98,7 @@ func gar(ts oauth2.TokenSource) (*Credential, error) {
 		Token: func(context.Context, Run) (string, error) {
 			t, err := ts.Token()
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("Google token: %w", err)
 			}
 			// Refused rather than attached, for StaticGitHub's reason: an empty
 			// token sends `Authorization: Bearer ` — an anonymous request — and
@@ -134,5 +111,13 @@ func gar(ts oauth2.TokenSource) (*Credential, error) {
 			}
 			return t.AccessToken, nil
 		},
-	}, nil
+	}
+	// Warmed through the credential's own Token, so boot refuses exactly what a
+	// request would — a source that errors, and one that answers with no error and
+	// no token — and the two refusals cannot drift apart.
+	if _, err := cred.Token(context.Background(), Run{}); err != nil {
+		return nil, err
+	}
+	log.Printf("creds: attaching the proxy's own Google identity to %v", garHosts)
+	return cred, nil
 }

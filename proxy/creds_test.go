@@ -159,9 +159,9 @@ func TestCredsAreBoundPerHost(t *testing.T) {
 // request rather than an error.
 func TestNewCredsRefusesUnintercepted(t *testing.T) {
 	dir := t.TempDir()
-	// The wildcard SAN matters: it is what lets the malformed patterns below pass
-	// the certificate check, so they can only be refused by the rule under test.
-	issue(t, dir, "github.test", "*.pkg.test")
+	// Exact SANs only, which is what the pattern row below leans on: `*-go.pkg.test`
+	// is a name this certificate cannot present.
+	issue(t, dir, "github.test", "europe-west1-go.pkg.test")
 	certs, err := LoadCerts(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -176,10 +176,10 @@ func TestNewCredsRefusesUnintercepted(t *testing.T) {
 			{Name: "a", Hosts: []string{"github.test"}},
 			{Name: "b", Hosts: []string{"github.test"}},
 		}},
-		// A `*` that is not the whole first character validates through the sample
-		// host and is then a key no host can ever match — a credential that
-		// silently never fires.
-		{"a `*` inside the name", []*Credential{{Name: "gar", Hosts: []string{"foo*.pkg.test"}}}},
+		// A pattern is validated like any other host binding, through one sample
+		// host. Only a whole-label wildcard SAN can present these names, so without
+		// one the proxy would intercept nothing and hand out nothing — silently.
+		{"a pattern the certificate cannot present", []*Credential{{Name: "gar", Hosts: []string{"*-go.pkg.test"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := NewCreds(certs, tc.creds...); err == nil {

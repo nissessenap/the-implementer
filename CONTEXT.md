@@ -76,8 +76,8 @@ sentinel to match; while on `api.github.com` an unconditional Basic is *ignored*
 private packages holding nothing — not a token, and not even a sentinel. Workload
 Identity and no key file: a service account key in a Secret is the long-lived
 credential Workload Identity exists to delete, so a cluster with no metadata
-server cannot turn this on, and kind proves the mechanism against a fake token
-source instead. The authorization is one grant,
+server cannot turn this on, and `proxy/gar_test.go` proves the mechanism against a
+fake token source instead. The authorization is one grant,
 `roles/artifactregistry.reader` — and unlike the GitHub credential it is **not
 scoped to the calling run**: it is the proxy's own identity, so every run reaches
 everything the grant covers, which is why it belongs on a repository rather than
