@@ -4,15 +4,10 @@
 # claim ADR 0005 makes about model access, and this is it in a cluster: the fixture
 # holds no credential, no sentinel, and not even a CA.
 #
-# Credentials: none, and the upstream is a mock. Not a compromise — the *credential*
-# here is Workload Identity, so a kind or k3s cluster cannot produce one at all and
-# there is deliberately nowhere to mount one (the same rule as GAR's, see
-# charts/proxy/values.yaml). What a mock cannot prove is that Google accepts the
-# URL shape; what it does prove is everything between the sandbox and Google — the
+# Credentials: none, and the upstream is a mock — ADR 0005 says why, and it is
+# GAR's reason. What it proves is everything between the sandbox and Google: the
 # chart's environment, the base URL, the rewrite, the attach, the location pin, and
-# SSE surviving the hop. Real Vertex is measured in ADR 0005 and pinned offline by
-# proxy/vertex_test.go; a credentialed run belongs to whichever ticket gives CI a
-# Workload Identity pool.
+# SSE surviving the hop.
 set -euo pipefail
 
 # shellcheck source=lib.sh

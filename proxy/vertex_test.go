@@ -130,8 +130,8 @@ func TestVertexWarmsTheTokenAtBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tok, _ := v.token(); tok != stubToken {
-		t.Errorf("the seam attached %q, want the stub", tok)
+	if tok, _ := v.Token(); tok.AccessToken != stubToken {
+		t.Errorf("the seam attached %q, want the stub", tok.AccessToken)
 	}
 	if _, err := NewVertex(nil, "vertex-mock:8080"); err == nil {
 		t.Error("a relative upstream was accepted")

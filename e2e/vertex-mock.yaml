@@ -1,12 +1,8 @@
 # Stage 70's upstream: Vertex, as far as the proxy is concerned. Applied by
 # e2e/70-vertex.sh, which substitutes nothing.
 #
-# It exists because the credential the model route attaches is Workload Identity
-# and a kind cluster has no metadata server — so the *credentialed* half of this
-# route cannot run here at all, and the half that can is the wiring: the chart's
-# environment, the base URL the sandbox is handed, the path rewrite, the attach,
-# and streaming surviving the hop. The proxy's `VERTEX_UPSTREAM` seam points here
-# and stubs the token, so nothing in this namespace holds a Google credential.
+# The proxy's `VERTEX_UPSTREAM` seam points here and stubs the token, so nothing in
+# this namespace holds a Google credential. See 70-vertex.sh for why.
 #
 # What it asserts on the proxy's behalf, by reporting it in the stream: which path
 # arrived, and which Authorization header. And it streams three deltas 300 ms

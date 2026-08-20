@@ -75,12 +75,10 @@ Identity, so a cluster with no metadata server cannot turn it on, and
 
 The **model route** stage has the same problem and answers it differently, because
 the part worth watching in a cluster is not the credential: it runs unconditionally
-against a mock Vertex, with the proxy's `vertex.upstream` seam pointing at it and
-stubbing the token, and asserts what the wiring can get wrong — the base URL, the
-path rewrite, a credential arriving on a request that carried none, the location
-pin, and three SSE deltas arriving 300 ms apart rather than in one buffered lump.
-Whether Google accepts the URL shape was measured on the prototype and is pinned
-offline; a credentialed run wants CI to have a Workload Identity pool.
+against a mock Vertex, behind the proxy's `vertex.upstream` seam, and asserts the
+wiring — base URL, path rewrite, a credential arriving on a request that carried
+none, the location pin, and SSE deltas arriving spread out rather than in one
+buffered lump. ADR 0005 says why it is a mock.
 
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
 cache and refresh, the GAR attach and the model route's rewrite and streaming — is
