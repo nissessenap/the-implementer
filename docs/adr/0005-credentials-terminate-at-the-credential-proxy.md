@@ -85,6 +85,40 @@ is proof rather than assertion. SSE streaming survives `ReverseProxy` natively,
 no `FlushInterval` tuning; deltas ~20 ms apart on a turn logged
 `ttfb=1.5s total=56s`.
 
+> **Amended 2026-08-20, on who may call the model route**, by #55 building it.
+> Every other credential here is reached through `CONNECT`, where the run secret
+> rides in the `https_proxy` URL's userinfo and every client sends it without being
+> configured to. The model route has no such hook: Claude Code reaches a **base
+> URL**, not a proxy, so there is no `Proxy-Authorization` for it to send and none
+> we can make it send. So this one route is identified by **source pod alone** —
+> `proxy.identify`, the informer lookup without the secret.
+>
+> That is a real weakening, and it is bounded by what the route hands out: the
+> credential is the proxy's own Google identity, scoped to nothing a run says, so a
+> run that impersonated another would gain exactly what it already has. What
+> identification still buys is the boundary that matters here — the caller must be a
+> run pod in this namespace, so nothing else in the cluster can spend the
+> operator's Vertex quota. The same weakening on the GitHub credential, which is
+> minted *for the calling run's repository*, would be a hole; do not copy it there.
+>
+> Two smaller notes from the same ticket. First, what the route forwards is **one
+> inference call on one publisher model**, POST only, and not "a Vertex path": the
+> `roles/aiplatform.user` above also carries `customJobs.create`,
+> `pipelineJobs.create` and `endpoints.deploy` — POSTs to the same host under the
+> same `/v1/projects/{p}/locations/{l}/` prefix — so a route that forwarded any
+> Vertex path would let a sandbox holding no Google credential run its own
+> containers in the operator's project. The host confines the credential to Vertex;
+> only the path shape confines it to talking to a model. The upstream host is
+> derived from the **location in that path**, which is sandbox-controlled input
+> deciding where a credential goes, so it is held to one DNS label's alphabet —
+> every refusal before anything is dialled.
+> And the e2e runs against a **mock** Vertex behind a one-knob seam
+> (`vertex.upstream`, which also stubs the token, so it cannot point a real
+> credential anywhere): the credential is Workload Identity, so a kind cluster
+> cannot produce one and there is deliberately nowhere to mount one — the same rule
+> that leaves Artifact Registry without a stage. What the mock proves is the wiring
+> and the streaming; that Google accepts the URL shape is the measurement above.
+
 ### GitHub: a sentinel, and a TLS-terminating swap
 
 The sandbox's `GH_TOKEN` is the literal string `proxy-injected`. The proxy

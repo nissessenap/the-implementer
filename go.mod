@@ -3,6 +3,7 @@ module github.com/nissessenap/the-implementer
 go 1.26.0
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/google/go-github/v88 v88.0.0
 	github.com/isometry/ghait v0.14.0
 	golang.org/x/oauth2 v0.36.0
@@ -16,7 +17,6 @@ require (
 	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.20.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.11.0 // indirect
 	cloud.google.com/go/kms v1.31.0 // indirect
 	cloud.google.com/go/longrunning v1.0.0 // indirect

@@ -1,0 +1,119 @@
+# Stage 70's fixture. Applied by e2e/70-vertex.sh, which substitutes
+# __RUNTIME_CLASS__ and __BASE_URL__.
+#
+# The point is what is not here, and it is a shorter list than any other fixture's:
+# no credential, no sentinel, and not even a trust bundle or a CA — a model call
+# needs one plain URL and nothing else. That is the whole contract ADR 0005 claims
+# for the model half, and this manifest is the assertion.
+#
+# Python rather than curl because the property under test is *timing*: three
+# deltas arriving 300 ms apart prove the proxy forwards them, where the same three
+# arriving together prove it buffered the turn — and busybox `date` has no
+# milliseconds to tell those apart with.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-vertex
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      # Run identity, and on the model route it is the *whole* of the
+      # authentication: Claude Code reaches a base URL, not a proxy, so there is
+      # no Proxy-Authorization for it to send and the source pod is all the proxy
+      # has. A pod without these annotations gets a 403 — see proxy.identify.
+      annotations:
+        implementer.dev/owner: acme
+        implementer.dev/repo: widgets
+        implementer.dev/issue: "5"
+        implementer.dev/run-uid: stage70
+    spec:
+      restartPolicy: Never
+      __RUNTIME_CLASS__
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: model
+          image: python:3.13-slim
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            # The one variable that matters, and it is plain config: the four that
+            # travel with it in a real sandbox (PROJECT_ID, CLOUD_ML_REGION,
+            # USE_VERTEX, SKIP_VERTEX_AUTH) are Claude Code's, and this fixture is
+            # not Claude Code — it is the request Claude Code makes.
+            - { name: ANTHROPIC_VERTEX_BASE_URL, value: "__BASE_URL__" }
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import json, os, time, urllib.request
+
+              base = os.environ["ANTHROPIC_VERTEX_BASE_URL"]
+              fail = []
+
+              # 1. What the sandbox holds. Asserted rather than asserted-about:
+              #    an environment carrying a model credential would make
+              #    everything below pass for the wrong reason.
+              held = [k for k in os.environ if any(s in k.upper() for s in
+                      ("API_KEY", "OAUTH", "TOKEN", "GOOGLE_APPLICATION"))]
+              if held:
+                  fail.append("the sandbox holds %s" % held)
+              print("PROBE sandbox-holds    nothing" if not held else "!!! %s" % held)
+
+              # 2. The model call. Claude Code appends this path to the base URL
+              #    and signs nothing, because CLAUDE_CODE_SKIP_VERTEX_AUTH=1.
+              path = ("/projects/e2e/locations/global/publishers/anthropic"
+                      "/models/claude-sonnet-4-6:streamRawPredict")
+              req = urllib.request.Request(base + path, method="POST",
+                                           data=b'{"stream":true,"messages":[]}',
+                                           headers={"Content-Type": "application/json"})
+              at, events = [], []
+              start = time.monotonic()
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  if r.status != 200:
+                      raise SystemExit("!!! FAIL: the model route answered %d" % r.status)
+                  for line in r:
+                      line = line.decode().strip()
+                      if line.startswith("data: "):
+                          at.append(time.monotonic() - start)
+                          events.append(json.loads(line[6:])["t"])
+              if len(at) != 3:
+                  raise SystemExit("!!! FAIL: read %d deltas, want 3: %s" % (len(at), events))
+
+              # 3. The rewrite: /vertex stripped, /v1 prepended, and the location
+              #    from the path decides the upstream host.
+              want = "path=/v1" + path
+              if events[0] != want:
+                  fail.append("Vertex saw %r, want %r" % (events[0], want))
+              print("PROBE vertex-path      %s" % events[0])
+
+              # 4. THE POINT OF THE TICKET: a credential the fixture never had.
+              #    Its value is the seam's stub — this cluster has no Workload
+              #    Identity — so what is asserted is that one arrived at all.
+              auth = events[1].removeprefix("auth=")
+              if not auth.startswith("Bearer ") or len(auth) <= len("Bearer "):
+                  fail.append("Vertex saw Authorization %r" % auth)
+              print("PROBE vertex-attached  %s  (the sandbox sent none)" % auth)
+
+              # 5. Streaming survives the hop. A buffered turn arrives with every
+              #    delta inside a millisecond of the last one, at the end — which
+              #    is invisible in the content and obvious in the timing.
+              span = at[-1] - at[0]
+              if span < 0.45:
+                  fail.append("three deltas arrived %.0f ms apart — buffered, not streamed" % (span * 1000))
+              print("PROBE vertex-stream    deltas at %s ms" % [round(t * 1000) for t in at])
+
+              # What is deliberately not probed here: the refusals. Which paths and
+              # locations the route rejects is string arithmetic — TestVertexRewrite
+              # and TestVertexRewriteRefusals in proxy/vertex_test.go, no cluster
+              # needed — and this stage is for what only a cluster can be wrong
+              # about.
+              if fail:
+                  raise SystemExit("!!! FAIL: " + "; ".join(fail))
+              print("the sandbox held no model credential and the model call worked")

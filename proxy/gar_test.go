@@ -36,11 +36,11 @@ func (f *fakeTS) Token() (*oauth2.Token, error) {
 // The credential is warmed at boot so an unusable Google identity kills the pod
 // rather than 502ing the first `pip install` mid-run.
 func TestGARWarmsTheTokenAtBoot(t *testing.T) {
-	if _, err := gar(&fakeTS{err: errors.New("no metadata server")}); err == nil {
+	if _, err := GAR(&fakeTS{err: errors.New("no metadata server")}); err == nil {
 		t.Error("gar accepted a token source that cannot produce a token")
 	}
 	ts := &fakeTS{tok: "ya29.fake"}
-	if _, err := gar(ts); err != nil {
+	if _, err := GAR(ts); err != nil {
 		t.Fatal(err)
 	}
 	if ts.asks != 1 {
@@ -50,7 +50,7 @@ func TestGARWarmsTheTokenAtBoot(t *testing.T) {
 	// `err == nil` is not the whole of "it works": attached, an empty token sends
 	// `Authorization: Bearer ` — an anonymous request logged as a credential
 	// attached, which is this component's one unacceptable failure.
-	if _, err := gar(&fakeTS{tok: ""}); err == nil {
+	if _, err := GAR(&fakeTS{tok: ""}); err == nil {
 		t.Error("gar accepted a token source handing out an empty access token")
 	}
 }
@@ -68,7 +68,7 @@ func TestGARBrokenTokenSourceIsAnError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := &fakeTS{tok: "ya29.fake"}
-			cred, err := gar(ts)
+			cred, err := GAR(ts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -88,7 +88,7 @@ func TestGARBrokenTokenSourceIsAnError(t *testing.T) {
 // and overwriting anything the sandbox sent. `pip` and `go mod download` present no
 // credential and do not retry after a 401, so there is nothing to match on.
 func TestGARAttachesUnconditionally(t *testing.T) {
-	cred, err := gar(&fakeTS{tok: "ya29.fake"})
+	cred, err := GAR(&fakeTS{tok: "ya29.fake"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestGARHostBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred, err := gar(&fakeTS{tok: "ya29.fake"})
+	cred, err := GAR(&fakeTS{tok: "ya29.fake"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestGARThroughARealInterception(t *testing.T) {
 	up.StartTLS()
 	defer up.Close()
 
-	cred, err := gar(&fakeTS{tok: "ya29.fake"})
+	cred, err := GAR(&fakeTS{tok: "ya29.fake"})
 	if err != nil {
 		t.Fatal(err)
 	}

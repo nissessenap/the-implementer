@@ -71,6 +71,55 @@ Artifact Registry nothing at all and do not retry on a 401, so there is no
 sentinel to match; while on `api.github.com` an unconditional Basic is *ignored*
 (measured: 200, limit 60, no error), which is a silent anonymous request.
 
+**Model route** — the one request the credential proxy answers that is not a
+CONNECT: `POST /vertex/…`, which is what `ANTHROPIC_VERTEX_BASE_URL` points at.
+The sandbox sends the model call unsigned — it holds no model credential at all,
+not blanked, absent — and the proxy reverse-proxies it to Vertex with the Google
+identity below attached. No interception, because there is nothing to intercept:
+the sandbox is *configured* to come here, so there is no name to impersonate, and
+a plaintext in-cluster hop leaks nothing when neither direction carries a
+credential. The upstream host comes from the **location in the path** rather than
+from configuration here, so the proxy reads back whatever `CLOUD_ML_REGION` the
+operator gave the sandbox — which makes the location sandbox-controlled input that
+decides where a credential goes, and it is constrained to one DNS label's alphabet.
+What the route forwards is **one inference call on one publisher model** —
+`:rawPredict`, `:streamRawPredict`, `:countTokens`, and a POST — and not "a Vertex
+path": `roles/aiplatform.user` also carries `customJobs.create`,
+`pipelineJobs.create` and `endpoints.deploy`, which are POSTs to the same host
+under the same prefix, so the host confines the credential to Vertex and only this
+shape confines it to talking to a model. Streaming is the property to keep: `httputil.ReverseProxy`
+forwards each SSE delta as it arrives with no `FlushInterval` tuning, and a
+buffered turn is invisible in the content and obvious in the timing, which is what
+both tests assert on.
+
+**Model identity** — how the model route knows who is calling, and it is weaker
+than the run secret on purpose: Claude Code reaches a base URL rather than a
+proxy, so there is no `Proxy-Authorization` it could send and the **source pod is
+the whole of the answer**. Bounded by what the route hands out — the credential is
+the proxy's own Google identity, scoped to nothing a run says, so a run that
+impersonated another would gain what it already has. What it still buys is that
+the caller must be a run pod in this namespace, so nothing else in the cluster can
+spend the operator's Vertex quota. The same weakening on the GitHub credential
+would be a hole, which is why it is not there.
+
+**Model pins** — the four models a run may name (`ANTHROPIC_MODEL`,
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+`ANTHROPIC_DEFAULT_HAIKU_MODEL`), and they are the **customer's project's**, not
+our release's: Vertex 404s a model the project has not enabled, and Claude Code
+resolves `opus`/`sonnet` to its own defaults, so the opus alias must be remapped
+or `/code-review`'s subagents 404. Sandbox environment and not proxy
+configuration — the proxy never reads a model name — so they belong to whoever
+writes the sandbox's environment.
+
+**Google identity** — the proxy's own service account, reached through Workload
+Identity and so the metadata server, and the credential behind *both* Google-facing
+halves: the model route above and the GAR credential below. One token source for
+the two, because it is one identity: no second secret, no second mount, and one
+hourly refresh rather than two caches that could disagree. Two grants,
+`roles/aiplatform.user` and `roles/artifactregistry.reader`, and no key anywhere —
+the chart offers nowhere to mount one, which is why a cluster with no metadata
+server cannot turn either half on.
+
 **GAR credential** — the proxy's own Google identity, attached to
 `{region}-go.pkg.dev` and `{region}-python.pkg.dev` so the sandbox installs
 private packages holding nothing — not a token, and not even a sentinel. Workload

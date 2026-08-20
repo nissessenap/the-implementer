@@ -88,6 +88,36 @@ githubApp:
 gar:
   enabled: false
 
+# The model route: Vertex, terminated here. On, the proxy reverse-proxies the
+# sandbox's model calls to Vertex with its own Google identity attached, so the
+# sandbox holds no model credential at all — not blanked, absent. The route, the
+# environment the orchestrator gives the sandbox instead, and the model pins are
+# ADR 0005's; nothing here configures them.
+#
+# The sandbox's `ANTHROPIC_VERTEX_BASE_URL` is `http://<this release>:8080/vertex`.
+# `http://` because neither direction carries a credential — and `no_proxy` must
+# name this Service, or the base URL is tunnelled through the proxy to the proxy.
+#
+# Operator prerequisites:
+#
+#   - `roles/aiplatform.user` on the proxy's Google service account, on the project
+#     the sandbox's `ANTHROPIC_VERTEX_PROJECT_ID` names. Like Artifact Registry and
+#     unlike GitHub, this credential is **not scoped to the calling run** — it is
+#     the proxy's own identity, so every run that authenticates reaches every model
+#     the grant covers. Grant it on the project you mean and no wider: it also
+#     carries `customJobs.create` and friends, which is why the proxy forwards
+#     model inference calls only and 400s every other Vertex path.
+#   - reach it with Workload Identity: serviceAccountAnnotations below. Not
+#     optional, and it fails quietly if you forget — see gar above, the failure is
+#     the same one and just as invisible. There is no key to mount, deliberately.
+vertex:
+  enabled: false
+
+  # The e2e seam, and the one knob that is not for operators: it points the route
+  # at a mock *and* stubs the token. e2e/70-vertex.sh is the only thing that sets
+  # it, and ADR 0005 says why that stage has no credential.
+  upstream: ""
+
 # Annotations for the proxy's ServiceAccount — Workload Identity's binding to a
 # Google service account lives here, and nothing else does.
 serviceAccountAnnotations: {}

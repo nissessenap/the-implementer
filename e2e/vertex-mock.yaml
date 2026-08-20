@@ -1,0 +1,101 @@
+# Stage 70's upstream: Vertex, as far as the proxy is concerned. Applied by
+# e2e/70-vertex.sh, which substitutes nothing.
+#
+# The proxy's `VERTEX_UPSTREAM` seam points here and stubs the token, so nothing in
+# this namespace holds a Google credential. See 70-vertex.sh for why.
+#
+# What it asserts on the proxy's behalf, by reporting it in the stream: which path
+# arrived, and which Authorization header. And it streams three deltas 300 ms
+# apart, which is the only way to tell a proxy that forwards them from one that
+# buffers the turn and hands the whole thing over at the end.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vertex-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vertex-mock }
+  template:
+    metadata:
+      labels: { app: vertex-mock }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mock
+          image: python:3.13-slim
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              # SSE by hand rather than a framework: three deltas, flushed, 300 ms
+              # apart. Threaded, because Go's transport keeps its connection alive
+              # for 90s after the stream and the readiness probe must still land.
+              import time
+              from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+              class H(BaseHTTPRequestHandler):
+                  protocol_version = "HTTP/1.1"
+
+                  def do_GET(self):
+                      body = b"ok\n"
+                      self.send_response(200)
+                      self.send_header("Content-Length", str(len(body)))
+                      self.end_headers()
+                      self.wfile.write(body)
+
+                  def do_POST(self):
+                      n = int(self.headers.get("Content-Length") or 0)
+                      self.rfile.read(n)
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/event-stream")
+                      # Chunked, because the length of a stream is unknown by
+                      # definition — and because a Content-Length here would let a
+                      # buffering proxy look like a streaming one.
+                      self.send_header("Transfer-Encoding", "chunked")
+                      self.end_headers()
+                      # The two things the proxy did, echoed where the fixture can
+                      # read them: the path it rewrote to, and the credential it
+                      # attached to a request that arrived with none.
+                      for i, ev in enumerate((
+                          "path=" + self.path,
+                          "auth=" + self.headers.get("Authorization", "<none>"),
+                          "done",
+                      )):
+                          if i:
+                              time.sleep(0.3)
+                          chunk = ('event: content_block_delta\ndata: {"i":%d,"t":"%s"}\n\n' % (i, ev)).encode()
+                          self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                          self.wfile.flush()
+                      self.wfile.write(b"0\r\n\r\n")
+                      self.wfile.flush()
+
+                  def log_message(self, fmt, *a):
+                      print("mock: " + fmt % a)
+
+              # Threading, so one idle keep-alive connection cannot stall the
+              # kubelet's readiness probe behind it.
+              ThreadingHTTPServer(("", 8080), H).serve_forever()
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vertex-mock
+spec:
+  selector: { app: vertex-mock }
+  ports:
+    - { port: 8080, targetPort: 8080 }

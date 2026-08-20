@@ -11,8 +11,14 @@
 // resolves that run's identity from Kubernetes, terminates TLS for the hosts its
 // own certificate names while tunnelling everything else opaquely, and attaches
 // each host's credential — swapping the sentinel for a GitHub token, and putting
-// the proxy's own Google identity on Artifact Registry. Vertex (#55) lands as a
-// further entry in that same per-host switch.
+// the proxy's own Google identity on Artifact Registry.
+//
+// Plus one route that is not a CONNECT at all: the model calls, which arrive as
+// ordinary requests to `ANTHROPIC_VERTEX_BASE_URL` and are reverse-proxied to
+// Vertex with the same Google identity attached. It needs no interception because
+// the sandbox is *configured* to come here, so there is no name to impersonate —
+// and no credential to leak on a plaintext in-cluster hop, because the sandbox
+// holds none. See vertex.go.
 //
 // Egress is unrestricted on purpose: the allowlist and the NetworkPolicy are
 // post-MVP with #16. Every CONNECT is logged, which is the inventory that ticket
@@ -27,6 +33,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -49,6 +56,17 @@ const (
 // CONNECT is either intercepted or tunnelled, and nothing else is served at all.
 type Server struct {
 	certs *Certs
+
+	// Vertex, when set, serves the model route: the one non-CONNECT request this
+	// proxy answers, and the only credential the sandbox reaches by base URL
+	// rather than through an interception. Nil is a proxy that serves CONNECT and
+	// nothing else, which is every deployment with no Vertex configured — and
+	// every test that is not about the model route.
+	//
+	// A field set at boot rather than a New parameter: it is one of four optional
+	// credentials, and threading each through a constructor is how a signature
+	// grows a nil argument per ticket.
+	Vertex http.Handler
 
 	// credFor: which credential, if any, an intercepted host is due. Nil is a
 	// proxy that holds none, which is every test that is not about credentials.
@@ -94,6 +112,11 @@ func New(certs *Certs, key []byte, resolve func(ctx context.Context, ip string) 
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodConnect {
+		s.model(w, r)
+		return
+	}
+
 	// First, and before the hijack: past that point the client has been told
 	// "200 Connection Established" and there is no way left to refuse it.
 	run, code, err := s.authenticate(r)
@@ -106,25 +129,52 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == http.MethodConnect {
-		// r.Host is the CONNECT authority, and from here on it is the only
-		// thing that decides where the bytes go.
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			http.Error(w, "CONNECT needs host:port", http.StatusBadRequest)
-			return
-		}
-		// The run is logged with the destination because that pairing is what
-		// the credential mints against: this run's repository, never the URL's.
-		log.Printf("CONNECT %s for %s", r.Host, run)
-		if s.certs.Intercepts(host) {
-			s.intercept(w, r, run)
-		} else {
-			s.tunnel(w, r)
-		}
+	// r.Host is the CONNECT authority, and from here on it is the only thing that
+	// decides where the bytes go.
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		http.Error(w, "CONNECT needs host:port", http.StatusBadRequest)
 		return
 	}
-	http.Error(w, "this proxy serves CONNECT", http.StatusNotImplemented)
+	// The run is logged with the destination because that pairing is what the
+	// credential mints against: this run's repository, never the URL's.
+	log.Printf("CONNECT %s for %s", r.Host, run)
+	if s.certs.Intercepts(host) {
+		s.intercept(w, r, run)
+	} else {
+		s.tunnel(w, r)
+	}
+}
+
+// model serves the one route that is not a CONNECT: the sandbox's model calls,
+// which arrive as ordinary requests to `ANTHROPIC_VERTEX_BASE_URL` and leave with
+// the proxy's own Google identity attached. Anything else is a 501, as it was
+// before this route existed.
+//
+// Identified by source pod and not by the run secret, which is a real weakening
+// and is bounded: see identify.
+func (s *Server) model(w http.ResponseWriter, r *http.Request) {
+	// Origin-form only: `r.URL.Host` is set when a client sends the proxied
+	// absolute form — `POST http://elsewhere/vertex/…`, which the sandbox can do
+	// because `https_proxy` names this port. Serving it would silently reroute a
+	// request the client addressed to another host into Vertex. The model route is
+	// the base URL the sandbox was handed, and nothing else.
+	if s.Vertex == nil || r.URL.Host != "" || !strings.HasPrefix(r.URL.Path, vertexPrefix) {
+		http.Error(w, "this proxy serves CONNECT", http.StatusNotImplemented)
+		return
+	}
+	run, code, err := s.identify(r)
+	if err != nil {
+		// %q on the path, and it is not cosmetic: URL.Path is percent-decoded, so
+		// `%0A` in a request target arrives as a real newline — and this line is
+		// written *before* the caller is identified, so anything in the cluster
+		// could otherwise forge proxy log lines. Same rule as authenticate's.
+		log.Printf("%s %s %q refused: %v", r.RemoteAddr, r.Method, r.URL.Path, err)
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
+	log.Printf("%s %q for %s", r.Method, r.URL.Path, run)
+	s.Vertex.ServeHTTP(w, r)
 }
 
 // bufConn is a hijacked connection that reads through the buffer net/http parsed
