@@ -37,12 +37,26 @@ type Credential struct {
 	// Name only ever appears in logs and load errors.
 	Name string
 
-	// Hosts are exact names, each validated at load to be a host the certificate
-	// intercepts. Exact and not patterns: a name that is not written here gets
-	// nothing, which is the property the wide certificate leans on.
-	// ponytail: #54's regional `{region}-go.pkg.dev` set may not be enumerable —
-	// that ticket adds a pattern if it is not, and inherits the same validation.
+	// Hosts are the names this credential may be attached to, each validated at
+	// load to be a host the certificate intercepts. Either an exact name, or one
+	// `*` standing for part of the leftmost label — `*-go.pkg.dev`, because
+	// Artifact Registry's endpoints are regional and pinning a region here would
+	// be a second place to configure one. A name no entry covers gets nothing,
+	// which is the property the wide certificate leans on.
 	Hosts []string
+
+	// Attach makes the credential unconditional: the request leaves with
+	// `Bearer <token>` whether or not it arrived with anything, and whatever it
+	// did arrive with is overwritten.
+	//
+	// Per-credential and not global, because the two shapes are opposites and
+	// each is wrong on the other's hosts. `pip` and `go mod download` send
+	// Artifact Registry no credential at all and do not retry on a 401, so there
+	// is no sentinel to match and nothing to swap; on GitHub a credential that is
+	// not the sentinel may legitimately be the user's own, so it travels on
+	// untouched. And on `api.github.com` an unconditional Basic is *ignored*
+	// (measured: 200, limit 60, no error) — a silent anonymous request.
+	Attach bool
 
 	// Token answers "what is this run due on this host". The Run is the whole
 	// point of the signature: MintedGitHub scopes the token it mints to the
@@ -70,8 +84,12 @@ func NewCreds(certs *Certs, creds ...*Credential) (Creds, error) {
 			// disagree otherwise: x509's VerifyHostname is case-insensitive, so
 			// `CONNECT GitHub.com:443` is intercepted — and an exact map lookup
 			// would then hand it no credential and push anonymously, silently.
-			h = strings.ToLower(h)
-			if !certs.Intercepts(h) {
+			h = strings.TrimSuffix(strings.ToLower(h), ".")
+			// A pattern is checked through one sample host — `x-go.pkg.dev` for
+			// `*-go.pkg.dev` — which is sound for the reason matchHost gives, and
+			// is a no-op on an exact name. An exact SAN fails the sample and the
+			// credential is refused, which is the conservative answer.
+			if !certs.Intercepts(strings.Replace(h, "*", "x", 1)) {
 				return nil, fmt.Errorf("credential %q names %s, which is not on the certificate", cr.Name, h)
 			}
 			if prev, ok := c[h]; ok {
@@ -84,16 +102,64 @@ func NewCreds(certs *Certs, creds ...*Credential) (Creds, error) {
 	return c, nil
 }
 
+// matchHost answers whether host — lowercased already — is covered by pat, where a
+// single leading `*` stands for one or more characters within the leftmost label.
+//
+// Deliberately not x509's rule, which only matches a wildcard occupying the
+// *whole* leftmost label and is why the certificate has to carry `*.pkg.dev`.
+// This is the narrower rule layered on top, and the no-dot check is what keeps it
+// narrower — it is also what makes NewCreds's one-sample validation sound, since
+// every host a pattern can match then differs from that sample in the leftmost
+// label alone.
+//
+// Only a *leading* `*` is a pattern: `foo*.pkg.dev` is taken literally and so
+// matches nothing. Not refused at load, because Hosts is never operator input —
+// it is garHosts, in this package, and TestGARHostBinding fails on that typo.
+func matchHost(pat, host string) bool {
+	suffix, ok := strings.CutPrefix(pat, "*")
+	if !ok {
+		return pat == host
+	}
+	label, ok := strings.CutSuffix(host, suffix)
+	return ok && label != "" && !strings.Contains(label, ".")
+}
+
 // For is the switch itself. A nil Creds answers "no credential" for every host,
 // which is what a proxy configured with none is.
-func (c Creds) For(host string) *Credential { return c[strings.ToLower(host)] }
+//
+// Exact names first, so a host written out by name always beats a pattern that
+// would also cover it.
+// ponytail: then linear over the whole map. Two patterns that could both match a
+// host would flap between credentials in map order — there is one
+// pattern-bearing credential today and its own two patterns cannot overlap, so a
+// second one wants a load-time overlap check rather than a cleverer loop here.
+func (c Creds) For(host string) *Credential {
+	// Lowercased *and* stripped of a trailing dot, because both are things x509
+	// normalises away and the switch has to agree with it: VerifyHostname trims
+	// the root label, so `CONNECT github.com.:443` is intercepted — and a lookup
+	// that missed it would hand it no credential and push anonymously, with no
+	// error. The same silent no-op as the casing, by a different normalisation.
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if cr, ok := c[host]; ok {
+		return cr
+	}
+	for pat, cr := range c {
+		if strings.HasPrefix(pat, "*") && matchHost(pat, host) {
+			return cr
+		}
+	}
+	return nil
+}
 
 // isSentinel is the one definition of "this credential is worthless". A prefix
 // rather than equality on Sentinel: see SentinelPrefix.
 func isSentinel(v string) bool { return strings.HasPrefix(v, SentinelPrefix) }
 
 // swap rewrites req's Authorization header in place, and reports whether it
-// swapped anything. The real token is fetched only once a sentinel has actually
+// touched anything. Two shapes of credential live here: Attach puts one on
+// unconditionally, and everything below swaps a sentinel for the real thing.
+//
+// For the swap, the real token is fetched only once a sentinel has actually
 // been found — git's anonymous first request carries none, and it must not be
 // refused because a Secret read happened to fail on a request that wanted nothing.
 //
@@ -110,15 +176,28 @@ func isSentinel(v string) bool { return strings.HasPrefix(v, SentinelPrefix) }
 // A credential that is not the sentinel travels on untouched and logged: it is
 // something the sandbox brought itself, and swallowing it would only hide it.
 func (cr *Credential) swap(ctx context.Context, req *http.Request, host string, run Run) (bool, error) {
+	if cr.Attach {
+		tok, err := cr.Token(ctx, run)
+		if err != nil {
+			return false, err
+		}
+		// Overwritten and not passed through — the opposite of the sentinel rule
+		// below, and deliberate: Artifact Registry has no equivalent of "a
+		// credential that is not ours might still be legitimately the user's",
+		// and leaving one there would only 401.
+		req.Header.Set("Authorization", "Bearer "+tok)
+		return true, nil
+	}
+
 	h := req.Header.Get("Authorization")
 	if h == "" {
-		// Nothing to swap. Not an error and not an attach: every client in the
-		// sandbox that wants GitHub holds the sentinel, and git retries with it
-		// after a 401 because the phase script puts it in the URL's userinfo.
-		// ponytail: `go` sends nothing and does not retry, so private modules
-		// need an unconditional attach — with a per-host shape, because
-		// api.github.com *ignores* Basic (measured: 200, limit 60, no error).
-		// The ticket that needs `go` against a private repo adds it.
+		// Nothing to swap, and this credential is not an Attach one. Not an
+		// error: every client in the sandbox that wants GitHub holds the
+		// sentinel, and git retries with it after a 401 because the phase script
+		// puts it in the URL's userinfo. A host that genuinely needs a credential
+		// out of nothing — `go` against a private module, `pip` against Artifact
+		// Registry — sets Attach, which is why that decision is per-credential
+		// and not a fallback here.
 		return false, nil
 	}
 	scheme, rest, ok := strings.Cut(h, " ")

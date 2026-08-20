@@ -44,3 +44,16 @@ skipped unless pointed at a real one. What the App needs:
 E2E_GITHUB_APP_ID=… E2E_GITHUB_APP_KEY=~/.secrets/app.pem \
   E2E_GITHUB_REPO=me/scratch E2E_GITHUB_OTHER_REPO=me/other-private ./e2e/60-github-mint.sh
 ```
+
+There is no GAR e2e stage, deliberately: the proxy's Google identity is Workload
+Identity and the chart offers nowhere to mount a service account key, so a cluster
+with no metadata server cannot turn it on. Do not add one — `proxy/gar_test.go`
+proves the same path (attach on `-python.pkg.dev`, tokenless on `-docker.pkg.dev`,
+through a real interception) against a fake token source, which is what runs
+locally and in CI.
+
+Against a real cluster, check the proxy log names the identity you meant: with no
+Workload Identity binding the metadata server hands out the *node pool's* service
+account and everything works, which is the one way to get this wrong invisibly.
+
+That service account needs `roles/artifactregistry.reader` and nothing else new.

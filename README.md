@@ -61,7 +61,7 @@ else via `E2E_IMAGE_LOAD` (a command taking the image name).
 Stages run in filename order, and every stage but the last two needs no real
 credential of any kind, so the whole thing runs on fork pull requests too — the
 run secret the proxy authenticates against is derived from a key the harness
-invents. The two exceptions skip themselves unless they are given one:
+invents. The exceptions skip themselves unless they are given one:
 
 - the **sentinel swap** wants `E2E_GITHUB_TOKEN` and `E2E_GITHUB_REPO`, a scratch
   repository it may push a dry run against;
@@ -69,9 +69,13 @@ invents. The two exceptions skip themselves unless they are given one:
   GitHub hands out) and `E2E_GITHUB_REPO` the App is installed on, plus an
   optional `E2E_GITHUB_OTHER_REPO` for the negative clone.
 
-What they prove — both credential shapes, git's 401 round-trip, and the mint's
-scope, cache and refresh — is covered offline by `go test ./proxy`. Adding a
-stage is adding a file to [`e2e/`](e2e/).
+There is deliberately no GAR stage: the proxy's Google identity is Workload
+Identity, so a cluster with no metadata server cannot turn it on, and
+`proxy/gar_test.go` proves the attach and the `-docker.pkg.dev` exclusion offline.
+
+What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
+cache and refresh, and the GAR attach — is covered offline by `go test ./proxy`.
+Adding a stage is adding a file to [`e2e/`](e2e/).
 
 ## Roadmap
 

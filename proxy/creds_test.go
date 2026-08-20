@@ -120,6 +120,10 @@ func TestCredsAreBoundPerHost(t *testing.T) {
 		// intercepted. An exact map lookup would hand it no credential and push
 		// anonymously with no error — the silent no-op this whole file is about.
 		"GitHub.test": true,
+		// The same disagreement by a different normalisation: x509 trims the root
+		// label, so `CONNECT github.test.:443` is intercepted too.
+		"github.test.":     true,
+		"API.github.test.": true,
 		// Intercepted, and deliberately tokenless: pre-signed blob storage
 		// carries its own authorization, and `-docker.pkg.dev` is the same rule.
 		"objects.github.test": false,
@@ -155,7 +159,9 @@ func TestCredsAreBoundPerHost(t *testing.T) {
 // request rather than an error.
 func TestNewCredsRefusesUnintercepted(t *testing.T) {
 	dir := t.TempDir()
-	issue(t, dir, "github.test")
+	// Exact SANs only, which is what the pattern row below leans on: `*-go.pkg.test`
+	// is a name this certificate cannot present.
+	issue(t, dir, "github.test", "europe-west1-go.pkg.test")
 	certs, err := LoadCerts(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -170,6 +176,10 @@ func TestNewCredsRefusesUnintercepted(t *testing.T) {
 			{Name: "a", Hosts: []string{"github.test"}},
 			{Name: "b", Hosts: []string{"github.test"}},
 		}},
+		// A pattern is validated like any other host binding, through one sample
+		// host. Only a whole-label wildcard SAN can present these names, so without
+		// one the proxy would intercept nothing and hand out nothing — silently.
+		{"a pattern the certificate cannot present", []*Credential{{Name: "gar", Hosts: []string{"*-go.pkg.test"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := NewCreds(certs, tc.creds...); err == nil {
