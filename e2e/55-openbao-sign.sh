@@ -34,16 +34,15 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 KEY=e2e-selftest
-# A private key lives in here, so it is removed on every exit — including an exit
-# from openbao_up below, which is why the trap is armed before the directory is
-# used and not after. Re-armed once openbao_up has a port-forward to kill, because
-# bash has one EXIT trap and $BAO_PF is how lib.sh shares it.
+# A private key lives in here, so it is removed on every exit. Armed twice, because
+# bash has one EXIT trap and openbao_up installs its own over this one: until it
+# returns the directory is still empty, and from there on this trap does both.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 stage "stand up OpenBao in dev mode"
 openbao_up
-trap 'rm -rf "$tmp"; kill "$BAO_PF" 2>/dev/null || true' EXIT
+trap 'rm -rf "$tmp"; bao_down' EXIT
 
 stage "import a throwaway RSA-2048 key into transit"
 # Throwaway, and generated here: this half of the stage is about transit, so the

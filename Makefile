@@ -22,7 +22,15 @@ test:
 	# The package again, because proxy/mint_vault_test.go only compiles under this
 	# tag: it is ghait's *vault* signing path, which nothing else here reaches —
 	# the e2e's OpenBao stage cannot call it without a GitHub App to mint for.
-	go test -tags ghait.vault -run TestVault ./proxy
+	go test -tags ghait.vault ./proxy
+	# The chart's refusals, which nothing else exercises: the e2e only ever renders
+	# the shapes that work, so an inverted guard is invisible until an operator
+	# hits it. Cheap because `helm template` needs no cluster.
+	! helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault --set-string githubApp.key=transit/app >/dev/null 2>&1
+	! helm template charts/proxy --set-string githubApp.vault.addr=http://openbao:8200 >/dev/null 2>&1
+	helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault \
+	  --set-string githubApp.key=transit/app --set-string githubApp.vault.addr=http://openbao:8200 \
+	  --set-string githubApp.vault.tokenSecretName=openbao-token >/dev/null
 
 # ko rather than a Dockerfile: no base image to keep patched, no build stage to
 # get wrong, and no build context to .dockerignore. The tag it prints is a hash

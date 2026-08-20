@@ -85,7 +85,11 @@ func newFakeTransit(t *testing.T, version int) *fakeTransit {
 		sum := sha256.Sum256(signing)
 		sig, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, sum[:])
 		if err != nil {
-			t.Fatal(err)
+			// Errorf and not Fatal: this runs on the server's goroutine, where
+			// FailNow is not allowed to be called from.
+			t.Errorf("sign: %v", err)
+			http.Error(w, "sign failed", http.StatusInternalServerError)
+			return
 		}
 		// `jws` marshaling is base64url with no padding — which is what lets ghait
 		// hand it straight to golang-jwt as the third segment — behind transit's

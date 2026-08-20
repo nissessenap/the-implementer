@@ -24,6 +24,10 @@
 # which the e2e sets, because its stages are re-runnable, and which an operator
 # should not: transit will not import over a key, so replacing means *deleting* it,
 # and a mistyped name would delete the wrong one.
+#
+# Needs GNU coreutils (`base64 -w0`) and OpenSSL proper — LibreSSL, which is what
+# `openssl` is on a stock macOS, has no `-id-aes256-wrap-pad` and so cannot do
+# step 3 at all.
 set -euo pipefail
 
 NAME=${1:?usage: transit-import.sh <key-name> <pem-path>}

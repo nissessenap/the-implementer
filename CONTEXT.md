@@ -176,8 +176,8 @@ claimed. Two known edges. Transit must **import**, like KMS, and OpenBao ships n
 And ghait v0.14.0 strips a hardcoded `vault:v1:` from the signature, so a *rotated*
 transit key returns `vault:v2:…` and the prefix lands inside the JWT's signature
 segment: every mint fails closed, an outage rather than a bypass, and the fix
-belongs upstream rather than here. Nothing rotates in dev mode, and stage 55 asserts the prefix it gets
-is the prefix ghait strips.
+belongs upstream rather than here. Nothing rotates in dev mode, and stage 55
+asserts the prefix it gets is the prefix ghait strips.
 
 **Run identity** — `owner`, `repo`, `issue` and `run-uid` in **annotations**
 (prefixed `implementer.dev/`), not labels,
