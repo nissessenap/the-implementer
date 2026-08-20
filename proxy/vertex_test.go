@@ -38,6 +38,13 @@ func TestVertexRewrite(t *testing.T) {
 		{"/vertex//v1/projects/p/locations/us/publishers/anthropic/models/m:streamRawPredict",
 			"aiplatform.us.rep.googleapis.com",
 			"/v1/projects/p/locations/us/publishers/anthropic/models/m:streamRawPredict"},
+		// a project literally called `locations` — a legal GCP project id, and the
+		// one input that told the shape check and the host apart back when the
+		// location was scanned for rather than captured: the host followed the
+		// *project* and the path kept the region, silently.
+		{"/vertex/projects/locations/locations/europe-west1/publishers/anthropic/models/m:rawPredict",
+			"europe-west1-aiplatform.googleapis.com",
+			"/v1/projects/locations/locations/europe-west1/publishers/anthropic/models/m:rawPredict"},
 		// the third verb Claude Code calls
 		{"/vertex/projects/p/locations/global/publishers/anthropic/models/m:countTokens",
 			"aiplatform.googleapis.com",

@@ -103,6 +103,13 @@ func (s *Server) identify(r *http.Request) (Run, int, error) {
 	}
 	// The same budget authenticate spends, for the same reason: a caller that is
 	// not a run pod must not be able to drive an apiserver lookup per request.
+	//
+	// Shared with the CONNECT route rather than its own, and the coupling is worth
+	// knowing when reading a log: a run whose proxy credential is wrong spends the
+	// burst on 407s and then gets 429 here too, so its model calls read as an
+	// outage while the actual fault is the credential. Left shared because that run
+	// is already broken — `git` and `gh` are dead in it either way — and a second
+	// limiter would buy clarity on a run nobody is debugging for its model route.
 	lim := s.fails.get(ip)
 	if lim.Tokens() < 1 {
 		return Run{}, http.StatusTooManyRequests, errors.New("too many auth failures")

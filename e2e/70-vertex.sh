@@ -33,6 +33,11 @@ stage "install the chart with the model route on"
 # and why the seam cannot be a way to send a real credential somewhere else.
 # The run key Secret is stage 30's; the GitHub credentials default off, and the
 # model route needs none of them.
+#
+# No --reuse-values, like every stage here: an upgrade resets whatever it does not
+# --set back to the chart default, so this one puts the GitHub credentials stages
+# 50 and 60 configured back to off. Harmless only because 70 runs last — a stage
+# after it that expects them still wired must set them again, or say --reuse-values.
 helm upgrade --install "$RELEASE" "$E2E_DIR/../charts/proxy" -n "$NS" \
   --set-string image="$IMG" \
   --set vertex.enabled=true \
@@ -49,3 +54,8 @@ echo
 echo "==> proxy log (each model call names the run it was identified as):"
 kubectl -n "$NS" logs "deploy/$RELEASE" --tail=20
 echo "==> the model route proven: unsigned in, credentialed out, streaming intact"
+
+# Last, and only on success — `set -e` means a failed stage leaves the mock and its
+# log where they can be read. Nothing after this needs it: the proxy dials the
+# upstream per request, never at boot, so the release is left healthy without it.
+kubectl -n "$NS" delete -f "$E2E_DIR/vertex-mock.yaml" --ignore-not-found >/dev/null

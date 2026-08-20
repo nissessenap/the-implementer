@@ -50,8 +50,12 @@ var vertexLocation = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 // The three verbs are what Claude Code calls and nothing else. A model listing or
 // a tuning call is a 400, deliberately: widen this when something the agent
 // actually needs is refused, and never to "whatever Vertex accepts".
+//
+// The location is a **capture** and not just a shape check: it is what picks the
+// upstream host below, and reading it back out of the path with a second parse is
+// how the validated location and the used one come to disagree.
 var vertexModelCall = regexp.MustCompile(
-	`^/v1/projects/[^/]+/locations/[^/]+/publishers/[^/]+/models/[^/:]+:(rawPredict|streamRawPredict|countTokens)$`)
+	`^/v1/projects/[^/]+/locations/([^/]+)/publishers/[^/]+/models/[^/:]+:(?:rawPredict|streamRawPredict|countTokens)$`)
 
 // vertexHost maps a Vertex location to its hostname. Claude Code puts the
 // location in the request path, so the proxy needs no region config of its own —
@@ -67,16 +71,6 @@ func vertexHost(loc string) string {
 	default:
 		return loc + "-aiplatform.googleapis.com"
 	}
-}
-
-func locationFromPath(p string) string {
-	seg := strings.Split(p, "/")
-	for i, s := range seg {
-		if s == "locations" && i+1 < len(seg) {
-			return seg[i+1]
-		}
-	}
-	return "global"
 }
 
 // rewriteVertex turns the path Claude Code appended to `ANTHROPIC_VERTEX_BASE_URL`
@@ -110,10 +104,15 @@ func rewriteVertex(inPath string) (upPath, host string, err error) {
 	if upPath != path.Clean(upPath) {
 		return "", "", fmt.Errorf("path %q does not clean to itself", inPath)
 	}
-	if !vertexModelCall.MatchString(upPath) {
+	// One parse, so the location that is checked below is the location that
+	// picks the host. Scanning the path for a `locations` segment instead reads
+	// the *project* when a project is called that — and then the host and the
+	// path name different regions, silently.
+	m := vertexModelCall.FindStringSubmatch(upPath)
+	if m == nil {
 		return "", "", fmt.Errorf("path %q is not a model inference call", inPath)
 	}
-	loc := locationFromPath(upPath)
+	loc := m[1]
 	if !vertexLocation.MatchString(loc) {
 		return "", "", fmt.Errorf("location %q is not a location", loc)
 	}
@@ -188,7 +187,13 @@ func NewVertex(ts oauth2.TokenSource, upstream string) (*Vertex, error) {
 			pr.Out.Host = pr.Out.URL.Host
 			// THE POINT OF THE WHOLE TICKET: the credential is attached here, and
 			// the sandbox holds nothing that resembles it.
-			pr.Out.Header.Set("Authorization", "Bearer "+pr.In.Context().Value(tokenKey{}).(string))
+			// Comma-ok and not an assertion, for what the failure would look
+			// like rather than for what could cause it: ServeHTTP always sets
+			// this, and nothing else reaches rp. But a panic here is recovered by
+			// net/http as a closed connection with no status line at all, which
+			// is strictly worse to debug than the 401 an unsigned request earns.
+			tok, _ := pr.In.Context().Value(tokenKey{}).(string)
+			pr.Out.Header.Set("Authorization", "Bearer "+tok)
 			// Whatever the sandbox sent as a model credential is meaningless
 			// upstream, and forwarding it would only be one more thing to explain
 			// in a Google audit log. `Authorization` is overwritten above;
