@@ -58,7 +58,7 @@ thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
 else via `E2E_IMAGE_LOAD` (a command taking the image name).
 
-Stages run in filename order, and every stage but the last two needs no real
+Stages run in filename order, and all but the two GitHub ones need no real
 credential of any kind, so the whole thing runs on fork pull requests too — the
 run secret the proxy authenticates against is derived from a key the harness
 invents. The exceptions skip themselves unless they are given one:
@@ -73,8 +73,18 @@ There is deliberately no GAR stage: the proxy's Google identity is Workload
 Identity, so a cluster with no metadata server cannot turn it on, and
 `proxy/gar_test.go` proves the attach and the `-docker.pkg.dev` exclusion offline.
 
+The **model route** stage has the same problem and answers it differently, because
+the part worth watching in a cluster is not the credential: it runs unconditionally
+against a mock Vertex, with the proxy's `vertex.upstream` seam pointing at it and
+stubbing the token, and asserts what the wiring can get wrong — the base URL, the
+path rewrite, a credential arriving on a request that carried none, the location
+pin, and three SSE deltas arriving 300 ms apart rather than in one buffered lump.
+Whether Google accepts the URL shape was measured on the prototype and is pinned
+offline; a credentialed run wants CI to have a Workload Identity pool.
+
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
-cache and refresh, and the GAR attach — is covered offline by `go test ./proxy`.
+cache and refresh, the GAR attach and the model route's rewrite and streaming — is
+covered offline by `go test ./proxy`.
 Adding a stage is adding a file to [`e2e/`](e2e/).
 
 ## Roadmap

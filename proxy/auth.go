@@ -78,6 +78,43 @@ func (s *Server) authenticate(r *http.Request) (Run, int, error) {
 	return claim, http.StatusOK, nil
 }
 
+// identify answers "which run is calling" for the one request that carries no
+// credential to check: the model route. Claude Code reaches it as an ordinary
+// base URL over plain HTTP — it is not talking to a proxy there, so there is no
+// `Proxy-Authorization` for it to send, and no way to make it send one. The
+// source pod is the whole of the answer.
+//
+// Weaker than authenticate, deliberately, and bounded by what the route hands
+// out. The model credential is the proxy's own Google identity and is scoped to
+// nothing a run says — every authenticated run reaches the same Vertex project —
+// so a run that successfully impersonated another would gain exactly what it
+// already has. Contrast the GitHub credential, which is minted *for the calling
+// run's repository* and where the same weakening would be a hole.
+//
+// What it still buys is the boundary that matters here: the caller must be a run
+// pod in this namespace, so nothing else in the cluster can spend the operator's
+// Vertex quota. Adding the run secret on top would buy nothing — it is derived
+// from the very annotations this resolve reads, so both halves would be answering
+// out of the same source.
+func (s *Server) identify(r *http.Request) (Run, int, error) {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return Run{}, http.StatusForbidden, errors.New("no source address")
+	}
+	// The same budget authenticate spends, for the same reason: a caller that is
+	// not a run pod must not be able to drive an apiserver lookup per request.
+	lim := s.fails.get(ip)
+	if lim.Tokens() < 1 {
+		return Run{}, http.StatusTooManyRequests, errors.New("too many auth failures")
+	}
+	run, err := s.resolve(r.Context(), ip)
+	if err != nil {
+		lim.Allow()
+		return Run{}, http.StatusForbidden, err
+	}
+	return run, http.StatusOK, nil
+}
+
 // proxyBasicAuth is http.Request.BasicAuth for the proxy header, which net/http
 // has no accessor for — so it is handed the same header under the name it does.
 func proxyBasicAuth(h string) (user, pass string, ok bool) {

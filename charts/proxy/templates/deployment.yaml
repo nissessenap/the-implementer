@@ -18,6 +18,13 @@
 {{- if and .Values.githubApp.appId (not (or .Values.githubApp.key .Values.githubApp.keySecretName)) }}
 {{- fail "githubApp.appId is set with no key: give it githubApp.key, or githubApp.keySecretName for the file provider" }}
 {{- end }}
+{{- if and .Values.vertex.upstream (not .Values.vertex.enabled) }}
+{{- /* The seam only means anything on the route it redirects. Rendered as
+       written, it would be a value that quietly does nothing — and the way that
+       is discovered is a model call reaching Google when the operator believed it
+       was pointed at a mock. cmd/proxy refuses the same pair at boot. */}}
+{{- fail "vertex.upstream is set with vertex.enabled false: the model route is off, so there is nothing to point anywhere" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -75,6 +82,16 @@ spec:
             # no key file to mount, so a cluster with no metadata server cannot
             # turn this on at all.
             - { name: GAR_ENABLED, value: "true" }
+            {{- end }}
+            {{- if .Values.vertex.enabled }}
+            # The model route. Same identity as GAR above, same Workload Identity
+            # prerequisite, and one more grant: roles/aiplatform.user.
+            - { name: VERTEX_ENABLED, value: "true" }
+            {{- if .Values.vertex.upstream }}
+            # The e2e seam: with this set no Google identity is resolved at all
+            # and the token attached is a worthless stub. See values.yaml.
+            - { name: VERTEX_UPSTREAM, value: {{ .Values.vertex.upstream | quote }} }
+            {{- end }}
             {{- end }}
             {{- if .Values.githubTokenSecretName }}
             # Set only when there is a Secret to read: absent, the proxy binds no

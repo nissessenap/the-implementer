@@ -56,4 +56,13 @@ Against a real cluster, check the proxy log names the identity you meant: with n
 Workload Identity binding the metadata server hands out the *node pool's* service
 account and everything works, which is the one way to get this wrong invisibly.
 
-That service account needs `roles/artifactregistry.reader` and nothing else new.
+That service account needs `roles/artifactregistry.reader` and `roles/aiplatform.user`,
+and nothing else new — one identity for both Google-facing halves.
+
+Stage 70, the model route, needs no credentials and never skips: it runs against a
+**mock** Vertex, pointed at by `vertex.upstream`, which also stubs the token — so
+the seam cannot send a real credential anywhere. Do not replace it with a stage
+that mounts a Google credential, for the GAR reason above; what a mock cannot
+prove (that Google accepts the URL shape) is measured in ADR 0005 and pinned by
+`proxy/vertex_test.go`. A credentialed run wants CI to have a Workload Identity
+pool, not a key in a Secret.

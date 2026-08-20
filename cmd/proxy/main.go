@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/oauth2"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -87,27 +88,64 @@ func main() {
 		}
 		creds = append(creds, gh)
 	}
-	// Artifact Registry, on the proxy's own Google identity — Workload Identity,
-	// and so a metadata server. There is nowhere to mount a key, deliberately, so
-	// a cluster without one cannot turn this on. Off by default and explicitly on
-	// rather than "on whenever ADC happens to resolve": the certificate covers
-	// `*.pkg.dev` either way, so attaching a Google token is the operator's
-	// decision and not a side effect of where the pod runs.
+	// The two credentials that are the proxy's own Google identity rather than
+	// anything a run says: Artifact Registry, and the model route. Both Workload
+	// Identity, and so a metadata server — there is nowhere to mount a key,
+	// deliberately, so a cluster without one cannot turn either on. Off by default
+	// and explicitly on rather than "on whenever ADC happens to resolve": the
+	// certificate covers `*.pkg.dev` either way, and the model route is a URL the
+	// operator hands the sandbox, so both are decisions and not side effects of
+	// where the pod runs.
 	//
-	// ponytail: set-or-not, not parsed — the chart only writes this var when the
-	// operator turned it on, so `GAR_ENABLED=false` by hand means on. A second
+	// ponytail: set-or-not, not parsed — the chart only writes these vars when the
+	// operator turned them on, so `GAR_ENABLED=false` by hand means on. A second
 	// writer wants strconv.ParseBool here.
-	if os.Getenv("GAR_ENABLED") != "" {
-		// Blocking, like the App key check above: it resolves ADC and spends one
-		// token, so a proxy that can reach no Google identity at all never goes
-		// ready. It cannot tell a *wrong* one from a right one — a GKE cluster
-		// with no Workload Identity binding lends its node pool's service account
-		// and everything works — so GAR logs the identity's email instead.
-		gar, err := proxy.GAR(context.Background())
+	//
+	// VERTEX_UPSTREAM is the e2e seam, and it is why the identity is resolved
+	// conditionally rather than up front: with the seam on there is no Google
+	// identity to resolve, which is the whole point — a kind cluster has none.
+	gar, vertex, upstream := os.Getenv("GAR_ENABLED") != "", os.Getenv("VERTEX_ENABLED") != "", os.Getenv("VERTEX_UPSTREAM")
+	var google oauth2.TokenSource
+	if gar || (vertex && upstream == "") {
+		// Blocking, like the App key check above: it resolves ADC, so a proxy that
+		// can reach no Google identity at all never goes ready. It cannot tell a
+		// *wrong* one from a right one — a GKE cluster with no Workload Identity
+		// binding lends its node pool's service account and everything works — so
+		// it logs the identity's email instead.
+		//
+		// One source for both, because it is one identity: no second secret, no
+		// second mount, and one hourly refresh rather than two caches that could
+		// disagree about it.
+		google, err = proxy.GoogleIdentity(context.Background())
+		if err != nil {
+			log.Fatalf("Google identity: %v", err)
+		}
+	}
+	if gar {
+		// Warmed here — one token spent at boot — so an unusable identity kills the
+		// pod rather than 502ing the first `pip install` twenty minutes into a run.
+		cred, err := proxy.GAR(google)
 		if err != nil {
 			log.Fatalf("Artifact Registry: %v", err)
 		}
-		creds = append(creds, gar)
+		creds = append(creds, cred)
+	}
+	// The model route, which is not a credential on an intercepted host and so not
+	// part of credFor at all: the sandbox is handed a base URL, and what arrives
+	// here is an ordinary request carrying nothing.
+	var model http.Handler
+	if vertex {
+		v, err := proxy.NewVertex(google, upstream)
+		if err != nil {
+			log.Fatalf("Vertex: %v", err)
+		}
+		model = v
+	} else if upstream != "" {
+		// Refused rather than ignored: the seam only means anything on the route it
+		// redirects, and a proxy that silently sent every model call to Google while
+		// the operator believed it was pointed at a mock is the wrong way round to
+		// find that out.
+		log.Fatal("VERTEX_UPSTREAM is set with VERTEX_ENABLED unset: the model route is off, so there is nothing to point anywhere")
 	}
 	// Validated against the certificate here, at boot: a credential bound to a
 	// host we cannot intercept can never fire, and the symptom months later is an
@@ -139,9 +177,11 @@ func main() {
 
 	// :8080 and not a knob: the sandbox is handed an `https_proxy` URL naming
 	// this port, so a second place to change it is a second place to get it wrong.
+	s := proxy.New(certs, key, pods.Run, credFor)
+	s.Vertex = model
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: proxy.New(certs, key, pods.Run, credFor),
+		Handler: s,
 
 		// The two timeouts a CONNECT proxy can actually set. Every pod in the
 		// cluster can reach this port — there is no NetworkPolicy in MVP — and
