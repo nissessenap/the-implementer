@@ -16,7 +16,9 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// A token source that hands out fixed tokens and counts the asks.
+// A token source that hands out fixed tokens and counts the asks. Not safe for
+// concurrent use, and it does not need to be: the production one is ADC's
+// ReuseTokenSource, whose own mutex is what makes a shared credential safe.
 type fakeTS struct {
 	tok  string
 	err  error
@@ -43,6 +45,32 @@ func TestGARWarmsTheTokenAtBoot(t *testing.T) {
 	}
 	if ts.asks != 1 {
 		t.Errorf("asked for %d tokens at boot, want 1", ts.asks)
+	}
+	// A token source answering with no error *and* no token is unusable too, and
+	// `err == nil` is not the whole of "it works": attached, an empty token sends
+	// `Authorization: Bearer ` — an anonymous request logged as a credential
+	// attached, which is this component's one unacceptable failure.
+	if _, err := gar(&fakeTS{tok: ""}); err == nil {
+		t.Error("gar accepted a token source handing out an empty access token")
+	}
+}
+
+// The same refusal per request, which boot cannot cover: a token source that
+// works at boot and later answers with an empty token. A 502 rather than an
+// anonymous request.
+func TestGAREmptyTokenIsRefusedPerRequest(t *testing.T) {
+	ts := &fakeTS{tok: "ya29.fake"}
+	cred, err := gar(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.tok = ""
+	req := &http.Request{Header: http.Header{}}
+	if _, err := cred.swap(context.Background(), req, "us-central1-go.pkg.dev", testRun); err == nil {
+		t.Error("an empty access token was not refused")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want nothing attached", got)
 	}
 }
 

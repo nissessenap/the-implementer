@@ -78,7 +78,10 @@ Identity and no key file: a service account key in a Secret is the long-lived
 credential Workload Identity exists to delete, so a cluster with no metadata
 server cannot turn this on, and kind proves the mechanism against a fake token
 source instead. The authorization is one grant,
-`roles/artifactregistry.reader`. `{region}-docker.pkg.dev` is on the same
+`roles/artifactregistry.reader` — and unlike the GitHub credential it is **not
+scoped to the calling run**: it is the proxy's own identity, so every run reaches
+everything the grant covers, which is why it belongs on a repository rather than
+a project. `{region}-docker.pkg.dev` is on the same
 certificate and stays **tokenless**: its `/v2/` challenge fires only on
 unauthenticated requests, so attaching a bearer may suppress a dance the proxy
 cannot yet answer, and blob fetches redirect to storage URLs that must not carry

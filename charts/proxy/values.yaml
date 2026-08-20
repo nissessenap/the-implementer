@@ -69,9 +69,12 @@ githubApp:
 #
 # Operator prerequisites:
 #
-#   - `roles/artifactregistry.reader` on the proxy's Google service account, at
-#     the project or the repository. It is the only new grant this needs — the
-#     token itself is the same identity that signs the App JWT.
+#   - `roles/artifactregistry.reader` on the proxy's Google service account. It is
+#     the only new grant this needs — the token itself is the same identity that
+#     signs the App JWT. **Grant it on the repository, not the project**, unless
+#     you mean the project: unlike the GitHub credential, this one is not scoped
+#     to the calling run — it is the proxy's own identity, so every run that
+#     authenticates reaches everything the grant covers.
 #   - reach it with Workload Identity: serviceAccountAnnotations below, exactly as
 #     for the KMS key. **Not optional, and it fails quietly if you forget**: with
 #     no binding the GKE metadata server hands this pod the *node's* service

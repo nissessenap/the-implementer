@@ -51,15 +51,26 @@ const garScope = "https://www.googleapis.com/auth/cloud-platform"
 // read once, here, and a rotated one would need a pod restart. It is one more
 // reason the chart offers nowhere to mount one.)
 func GAR(ctx context.Context) (*Credential, error) {
-	// Named in the log before anything is attached, because the one way to get
-	// this wrong is invisible otherwise: **ADC falls back to the node pool's
-	// service account** when a GKE cluster has no Workload Identity binding, and
-	// it works — the proxy comes up, and every sandbox request to Artifact
-	// Registry then carries the Compute Engine default identity instead of the one
-	// the operator granted `roles/artifactregistry.reader` to. Not refused here,
-	// because the proxy has nothing to compare the answer against: only the
-	// operator knows which account they meant. So it goes in the log, once, where
-	// the wrong answer is legible.
+	// Refused rather than left to ADC, whose search order is wider than the one
+	// path this supports: `GOOGLE_APPLICATION_CREDENTIALS`, then gcloud's
+	// well-known file, and only then the metadata server. Either of the first two
+	// is a long-lived key — the credential Workload Identity exists to delete —
+	// and either would also silence the identity log below, which is the metadata
+	// server's answer or nothing. Unreachable from this chart today (one `env:`
+	// block, no extraEnv, no gcloud in the image), which is what makes one line
+	// enough to keep "Workload Identity only" enforced rather than merely written.
+	if !metadata.OnGCE() {
+		return nil, fmt.Errorf("no metadata server: the GAR credential is Workload Identity, and there is deliberately no key to mount")
+	}
+	// Named in the log before anything is attached, because the one way left to
+	// get this wrong is invisible otherwise: **the metadata server hands out the
+	// node pool's service account** when a GKE cluster has no Workload Identity
+	// binding, and it works — the proxy comes up, and every sandbox request to
+	// Artifact Registry then carries the Compute Engine default identity instead
+	// of the one the operator granted `roles/artifactregistry.reader` to. Not
+	// refused here, because the proxy has nothing to compare the answer against:
+	// only the operator knows which account they meant. So it goes in the log,
+	// once, where the wrong answer is legible.
 	if email, err := metadata.EmailWithContext(ctx, "default"); err == nil {
 		log.Printf("creds: the proxy's Google identity is %s — if that is a node pool's default service account, Workload Identity is not bound", email)
 	}
@@ -85,6 +96,13 @@ func gar(ts oauth2.TokenSource) (*Credential, error) {
 	tok, err := ts.Token()
 	if err != nil {
 		return nil, fmt.Errorf("Google token: %w", err)
+	}
+	// The same refusal as Token below, and here for the reason the doc comment
+	// gives: boot exists so an *unusable* credential kills the pod, and a token
+	// source answering with no error and no token is unusable. `err == nil` is
+	// not the whole of "it works".
+	if tok.AccessToken == "" {
+		return nil, fmt.Errorf("the Google token source returned an empty access token")
 	}
 	log.Printf("creds: attaching the proxy's own Google identity to %v (first token expires %s)",
 		garHosts, tok.Expiry.UTC().Format(time.RFC3339))

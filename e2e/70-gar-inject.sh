@@ -8,8 +8,9 @@
 # file to mount, deliberately (a service account key in a Secret is the long-lived
 # credential Workload Identity exists to delete). So this stage only runs against a
 # cluster whose proxy pod can reach a metadata server: GKE, with
-# E2E_ALLOW_REMOTE=1. On kind and k3s it skips, and proxy/gar_test.go proves the
-# same path end to end there against a fake token source.
+# E2E_ALLOW_REMOTE=1 and the E2E_EXPECT_CLUSTER that unlock demands. On kind and
+# k3s it skips, and proxy/gar_test.go proves the same path end to end there
+# against a fake token source.
 #
 # It upgrades an already-installed release and does not install one, so stages 10
 # to 30 have to have run against this cluster first — `make e2e` with the variables

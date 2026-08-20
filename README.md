@@ -71,7 +71,11 @@ invents. The exceptions skip themselves unless they are given one:
 - **GAR injection** wants `E2E_GAR_INDEX` and `E2E_GAR_PACKAGE`, a private wheel
   it may install. It also wants a proxy that can reach a metadata server, because
   the Google identity is Workload Identity and there is nowhere to mount a key —
-  so on kind and k3s this one stays skipped by construction.
+  so on kind and k3s this one stays skipped by construction. Reaching a real
+  cluster needs `E2E_ALLOW_REMOTE=1` *and* `E2E_EXPECT_CLUSTER`, a substring of
+  the API server URL you meant: unlocking the local-only guard without naming
+  what it unlocks is how the harness ends up installing into a production
+  context.
 
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
 cache and refresh, and the GAR attach against a fake token source — is covered

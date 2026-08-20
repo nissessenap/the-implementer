@@ -55,8 +55,14 @@ against a fake token source, which is what runs locally and in CI.
 Against GKE, where it can run — the whole harness, because stage 70 upgrades the
 release the earlier stages installed rather than installing one itself:
 
+`E2E_ALLOW_REMOTE=1` alone is refused: it also needs `E2E_EXPECT_CLUSTER`, a
+substring of the API server URL you meant. `make e2e` installs a namespace, a CA
+and a Deployment into whatever context is current, and on this laptop that is a
+production cluster unless something names the one you intended.
+
 ```sh
-E2E_ALLOW_REMOTE=1 E2E_GAR_INDEX=https://europe-west1-python.pkg.dev/proj/repo/simple/ \
+E2E_ALLOW_REMOTE=1 E2E_EXPECT_CLUSTER=my-sandbox-cluster \
+  E2E_GAR_INDEX=https://europe-west1-python.pkg.dev/proj/repo/simple/ \
   E2E_GAR_PACKAGE=my-private-package E2E_GAR_GSA=proxy@proj.iam.gserviceaccount.com \
   make e2e
 ```
