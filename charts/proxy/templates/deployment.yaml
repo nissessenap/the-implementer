@@ -12,13 +12,6 @@
        same pair at boot, for anyone deploying without this chart. */}}
 {{- fail "githubApp.appId and githubTokenSecretName are both set: the minted and static GitHub credentials are not interchangeable, pick one" }}
 {{- end }}
-{{- if and .Values.githubApp.appId .Values.githubApp.keySecretName (ne .Values.githubApp.provider "file") }}
-{{- /* The same rule one level down. A mounted PEM is the `file` provider's key
-       and nothing else's; against `gcp` it would set GITHUB_APP_KEY to a path
-       where a crypto key version resource name belongs, and the failure would be
-       a KMS name error naming a file. */}}
-{{- fail "githubApp.keySecretName is the file provider's key; set githubApp.key for any other provider" }}
-{{- end }}
 {{- if and .Values.githubApp.appId (eq .Values.githubApp.provider "vault") (not (and $vault.addr $vault.tokenSecretName)) }}
 {{- /* Both, and refused rather than defaulted, because both defaults are traps: no
        VAULT_ADDR and the client dials https://127.0.0.1:8200, which is *this pod*;
@@ -35,8 +28,8 @@
        wrong values and neither should render. */}}
 {{- fail "githubApp.vault is the vault provider's configuration; set githubApp.provider to vault or drop it" }}
 {{- end }}
-{{- if and .Values.githubApp.appId (not (or .Values.githubApp.key .Values.githubApp.keySecretName)) }}
-{{- fail "githubApp.appId is set with no key: give it githubApp.key, or githubApp.keySecretName for the file provider" }}
+{{- if and .Values.githubApp.appId (not .Values.githubApp.key) }}
+{{- fail "githubApp.appId is set with no key: githubApp.key is the signer's reference, and every provider needs one" }}
 {{- end }}
 {{- if and .Values.vertex.upstream (not .Values.vertex.enabled) }}
 {{- /* The seam only means anything on the route it redirects. Rendered as
@@ -86,15 +79,13 @@ spec:
                 fieldRef: { fieldPath: metadata.namespace }
             {{- if .Values.githubApp.appId }}
             # The minting path. The App's private key is not here and never is:
-            # GITHUB_APP_KEY names a signer's key — a KMS crypto key version, or
-            # the mount path of a PEM Secret for the `file` provider.
+            # GITHUB_APP_KEY names a *signer's* key — a KMS crypto key version, or
+            # a transit key — and the signer holds the private one. There is no
+            # shape of this chart that mounts a PEM: the image drops ghait's
+            # PEM-on-disk provider at build time (`ghait.no_file`, see the Makefile).
             - { name: GITHUB_APP_ID, value: "{{ .Values.githubApp.appId }}" }
             - { name: GITHUB_APP_PROVIDER, value: {{ .Values.githubApp.provider | quote }} }
-            {{- if .Values.githubApp.keySecretName }}
-            - { name: GITHUB_APP_KEY, value: /run/github-app/key }
-            {{- else }}
             - { name: GITHUB_APP_KEY, value: {{ .Values.githubApp.key | quote }} }
-            {{- end }}
             {{- if eq .Values.githubApp.provider "vault" }}
             # ghait hands the vault provider no options, so its client is
             # configured by the environment and these two are the whole of it —
@@ -144,9 +135,6 @@ spec:
             # restart of this Deployment.
             - { name: tls, mountPath: /tls, readOnly: true }
             - { name: run-key, mountPath: /run/run-key, readOnly: true }
-            {{- if and .Values.githubApp.appId .Values.githubApp.keySecretName }}
-            - { name: github-app-key, mountPath: /run/github-app, readOnly: true }
-            {{- end }}
             {{- if .Values.githubTokenSecretName }}
             - { name: github-token, mountPath: /run/github, readOnly: true }
             {{- end }}
@@ -156,10 +144,6 @@ spec:
           secret: { secretName: {{ .Values.tlsSecretName }} }
         - name: run-key
           secret: { secretName: {{ .Values.runKeySecretName }} }
-        {{- if and .Values.githubApp.appId .Values.githubApp.keySecretName }}
-        - name: github-app-key
-          secret: { secretName: {{ .Values.githubApp.keySecretName }} }
-        {{- end }}
         {{- if .Values.githubTokenSecretName }}
         - name: github-token
           secret: { secretName: {{ .Values.githubTokenSecretName }} }

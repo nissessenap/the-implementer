@@ -26,8 +26,11 @@ runKeySecretName: proxy-run-key
 # on the proxy's behalf and `key` is that signer's reference:
 #
 #   provider: gcp   key: projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/1
-#   provider: file  keySecretName: my-app-key   (a PKCS#1 PEM under the key `key`)
 #   provider: vault key: transit/github-app       (plus vault.addr below)
+#
+# There is no shape here that mounts the PEM itself: ghait registers a PEM-on-disk
+# `file` provider by default and every image built from this repo drops it
+# (`ghait.no_file`, see the Makefile), so the chart offers nowhere to put one.
 #
 # The provider must also be *linked into the image* — `make image GO_TAGS=…`, see
 # the Makefile. Naming one that is not is a boot failure, by name.
@@ -50,11 +53,6 @@ githubApp:
   appId: ""
   provider: gcp
   key: ""
-  # For `file` only, and the chart refuses to render otherwise: a Secret whose
-  # `key` entry is a PKCS#1 PEM, mounted at /run/github-app/key and used as `key`
-  # above. The one shape where the App's private key exists in the cluster at all —
-  # which is why the e2e does not use it either: it signs through `vault`, below.
-  keySecretName: ""
 
   # For `provider: vault` only, and the chart refuses to render otherwise. The
   # self-hosted signer: HashiCorp Vault or OpenBao transit, which are wire-identical

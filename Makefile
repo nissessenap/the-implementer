@@ -28,6 +28,7 @@ test:
 	# hits it. Cheap because `helm template` needs no cluster.
 	! helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault --set-string githubApp.key=transit/app >/dev/null 2>&1
 	! helm template charts/proxy --set-string githubApp.vault.addr=http://openbao:8200 >/dev/null 2>&1
+	! helm template charts/proxy --set githubApp.appId=1 >/dev/null 2>&1
 	helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault \
 	  --set-string githubApp.key=transit/app --set-string githubApp.vault.addr=http://openbao:8200 \
 	  --set-string githubApp.vault.tokenSecretName=openbao-token >/dev/null
