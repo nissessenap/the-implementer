@@ -15,6 +15,23 @@ test:
 	# and drops the PEM one, so `go test`'s tag set never compiles it. Nothing
 	# else here would catch a break in that half until release.
 	go build -tags $(GO_TAGS) -o /dev/null ./cmd/proxy
+	# And the e2e's build is a third one. Here rather than only in the stage that
+	# uses it, so a break in the self-hosted signer costs a `make test` and not a
+	# cluster.
+	go build -tags ghait.vault,ghait.no_file -o /dev/null ./cmd/proxy
+	# The package again, because proxy/mint_vault_test.go only compiles under this
+	# tag: it is ghait's *vault* signing path, which nothing else here reaches —
+	# the e2e's OpenBao stage cannot call it without a GitHub App to mint for.
+	go test -tags ghait.vault ./proxy
+	# The chart's refusals, which nothing else exercises: the e2e only ever renders
+	# the shapes that work, so an inverted guard is invisible until an operator
+	# hits it. Cheap because `helm template` needs no cluster.
+	! helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault --set-string githubApp.key=transit/app >/dev/null 2>&1
+	! helm template charts/proxy --set-string githubApp.vault.addr=http://openbao:8200 >/dev/null 2>&1
+	! helm template charts/proxy --set githubApp.appId=1 >/dev/null 2>&1
+	helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault \
+	  --set-string githubApp.key=transit/app --set-string githubApp.vault.addr=http://openbao:8200 \
+	  --set-string githubApp.vault.tokenSecretName=openbao-token >/dev/null
 
 # ko rather than a Dockerfile: no base image to keep patched, no build stage to
 # get wrong, and no build context to .dockerignore. The tag it prints is a hash
@@ -34,8 +51,8 @@ export KO_DOCKER_REPO
 # binary, the smaller that surface. `ghait.no_file` drops the PEM-on-disk signer
 # that ghait registers by default, which production must not have.
 #
-# The e2e signs with a local PEM and so builds `GO_TAGS=` — the default set, which
-# is the file provider alone.
+# The e2e signs through OpenBao transit and so builds `ghait.vault,ghait.no_file` —
+# the same shape as production, one provider swapped, and no PEM signer in either.
 GO_TAGS ?= ghait.gcp,ghait.no_file
 
 # Prints the image reference on stdout and nothing else. e2e/30-proxy.sh reads it.

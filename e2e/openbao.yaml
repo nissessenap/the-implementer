@@ -1,0 +1,71 @@
+# The signer, in the cluster. Applied by e2e/lib.sh's openbao_up, which stages 55
+# and 60 both call; __TOKEN__ is substituted with lib.sh's BAO_TOKEN.
+#
+# Dev mode, and that is the whole reason this is cheap: `server -dev` initialises
+# and unseals itself with an in-memory barrier, so there is no unseal dance, no
+# storage, and nothing to clean up — a restarted pod is an empty OpenBao and the
+# stages import into it again.
+#
+# In the cluster rather than on the harness's host, which is where #56 put it: the
+# *proxy pod* is what has to reach this, and a pod reaching a port on the
+# developer's laptop is the one thing lib.sh has no portable answer for — kind has
+# no host.docker.internal and k3s's answer is a different address again. In-cluster
+# there is a Service name and nothing to configure, and the import runs through
+# `kubectl port-forward`, which works on both.
+#
+# ponytail: no chart, no persistence, no TLS. Dev mode is a single process with a
+# root token printed on stdout — an operator's OpenBao is their own, and what this
+# has to be faithful about is the transit API, which is identical.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbao
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: openbao }
+  template:
+    metadata:
+      labels: { app: openbao }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: openbao
+          image: openbao/openbao:2.4.1
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          # `bao` directly, not the image's entrypoint: that script chowns
+          # /openbao and expects to start as root, which this pod is not.
+          command: ["bao"]
+          # -dev-no-store-token, or dev mode writes the root token to $HOME and
+          # dies on the read-only root filesystem above. The token is an argument
+          # and so visible in this pod's spec, which is what it is: a literal the
+          # harness invented, like lib.sh's RUN_KEY.
+          args:
+            - server
+            - -dev
+            - -dev-no-store-token
+            - -dev-root-token-id=__TOKEN__
+            - -dev-listen-address=0.0.0.0:8200
+          ports:
+            - containerPort: 8200
+          readinessProbe:
+            httpGet: { path: /v1/sys/health, port: 8200 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+spec:
+  selector: { app: openbao }
+  ports:
+    - { port: 8200, targetPort: 8200 }

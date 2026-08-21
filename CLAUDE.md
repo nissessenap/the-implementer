@@ -26,6 +26,12 @@ E2E_GITHUB_TOKEN=$(gh auth token) E2E_GITHUB_REPO=nissessenap/scratch make e2e
 It needs `repo` scope, which `gh auth login` grants by default — check with
 `gh auth status`.
 
+Stage 55 needs nothing and never skips: OpenBao in dev mode in the cluster, a key
+it generates itself, and `e2e/transit-import.sh` to get that key into transit —
+OpenBao has no `bao transit import`, so that script is the wrapping protocol by
+hand. Stage 60 signs through the same OpenBao, which is why there is no App-key
+Secret in the cluster any more: the PEM is read on this machine and imported.
+
 Stage 60 mints as a **GitHub App** and `gh` has no token for that, so it stays
 skipped unless pointed at a real one. What the App needs:
 
@@ -33,8 +39,9 @@ skipped unless pointed at a real one. What the App needs:
   No installation id anywhere — the proxy resolves one per run from the run's own
   repository.
 - `E2E_GITHUB_APP_KEY` is a **path** to GitHub's downloaded PEM, byte-for-byte
-  (PKCS#1, `BEGIN RSA PRIVATE KEY`). Not the key's contents: the harness mounts
-  the file as a Secret, and an inline key is one `echo` away from a transcript.
+  (PKCS#1, `BEGIN RSA PRIVATE KEY`). Not the key's contents: the harness converts
+  the file and wraps it into transit, and an inline key is one `echo` away from a
+  transcript.
 - `E2E_GITHUB_OTHER_REPO` is optional and only earns its keep when it is
   **private *and* in the same installation**. Public and the clone succeeds
   anonymously — a false FAIL. Outside the installation and it fails for the wrong

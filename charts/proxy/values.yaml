@@ -26,7 +26,11 @@ runKeySecretName: proxy-run-key
 # on the proxy's behalf and `key` is that signer's reference:
 #
 #   provider: gcp   key: projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/1
-#   provider: file  keySecretName: my-app-key   (a PKCS#1 PEM under the key `key`)
+#   provider: vault key: transit/github-app       (plus vault.addr below)
+#
+# There is no shape here that mounts the PEM itself: ghait registers a PEM-on-disk
+# `file` provider by default and every image built from this repo drops it
+# (`ghait.no_file`, see the Makefile), so the chart offers nowhere to put one.
 #
 # The provider must also be *linked into the image* — `make image GO_TAGS=…`, see
 # the Makefile. Naming one that is not is a boot failure, by name.
@@ -49,11 +53,40 @@ githubApp:
   appId: ""
   provider: gcp
   key: ""
-  # For `file` only, and the chart refuses to render otherwise: a Secret whose
-  # `key` entry is a PKCS#1 PEM, mounted at /run/github-app/key and used as `key`
-  # above. This is the e2e's path, and it is the one shape where the App's private
-  # key exists in the cluster at all.
-  keySecretName: ""
+
+  # For `provider: vault` only, and the chart refuses to render otherwise. The
+  # self-hosted signer: HashiCorp Vault or OpenBao transit, which are wire-identical
+  # here, and `key` above is the transit key — `transit/github-app`, or
+  # `transit/sign/github-app` spelled out. This is the path the e2e exercises on
+  # every pull request, so it is the one operator story here that is demonstrated
+  # rather than claimed.
+  #
+  # Operator prerequisites, and the first is `gcp`'s word for word: the transit key
+  # is an **import**, not generate-in-place, because GitHub generates the App's key
+  # pair and offers no bring-your-own-public-key. Vault has `vault transit import`;
+  # OpenBao ships no equivalent, so `e2e/transit-import.sh` is that helper — it
+  # takes a name and a PEM and knows nothing about the harness.
+  #
+  #   - the key must be **rsa-2048** with signing support: ghait's boot-time check
+  #     reads it back and refuses anything else, by name.
+  #   - the token needs `update` on `<transit>/sign/<key>` and `read` on
+  #     `<transit>/keys/<key>` — the second is what that boot-time check costs, and
+  #     it is the same trade as `gcp`'s cryptoKeyVersions.get.
+  #   - ⚠️ **do not rotate the transit key.** ghait v0.14.0 strips a hardcoded
+  #     `vault:v1:` from the signature, so a rotated key returns `vault:v2:…` and
+  #     the prefix lands inside the JWT's signature segment. It fails closed —
+  #     every mint 401s, which is an outage and not a bypass — but it is an outage
+  #     with no obvious cause. Fixed by a fix upstream, not by anything here. Until
+  #     then: `proxy/mint_vault_test.go` pins the fail-closed behaviour and go.mod
+  #     carries the warning against a blind bump, and e2e stage 55 asserts the
+  #     prefix that arrives is the prefix ghait strips.
+  vault:
+    addr: ""
+    # A Secret whose `token` entry is the Vault token, exposed as VAULT_TOKEN. The
+    # provider's client is configured by environment only — ghait passes it no
+    # options — so this is the only way in, and there is no AppRole or Kubernetes
+    # auth path here to log in with instead.
+    tokenSecretName: ""
 
 # Artifact Registry. On, the proxy attaches its own Google identity as a plain
 # bearer to `{region}-go.pkg.dev` and `{region}-python.pkg.dev`, so the sandbox
