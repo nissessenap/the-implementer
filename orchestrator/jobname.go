@@ -35,14 +35,18 @@ const hashLen = 8
 // The run's UID is deliberately not part of the name — it is what makes the
 // *credential* per-run, where the name is per-issue on purpose.
 func JobName(r proxy.Run) string {
-	slug := slugify(r.Owner + "-" + r.Repo + "-" + r.Issue)
+	raw := r.Owner + "-" + r.Repo + "-" + r.Issue
+	slug := slugify(raw)
 
 	// The condition is wider than length, and that is the load-bearing clause.
 	// Normalisation is lossy: `acme/my_repo#5` and `acme/my-repo#5` both slugify
 	// to `acme-my-repo-5`, both are under the cap, and a length-only condition
 	// would give them the same name — silently swallowing the second run as
 	// redelivery, which turns "no database" into "silently drops runs".
-	if len(slug) <= maxName && plain(r.Owner) && plain(r.Repo) {
+	//
+	// "Slugifying lost nothing" is exactly "the slug is the identity, lowercased",
+	// so the comparison is the predicate — no second spelling of the alphabet.
+	if len(slug) <= maxName && slug == strings.ToLower(raw) {
 		return slug
 	}
 
@@ -70,13 +74,4 @@ func slugify(s string) string {
 		}
 	}
 	return strings.Trim(string(b), "-")
-}
-
-// plain is "slugifying this loses nothing" — the field is already the slug's own
-// alphabet, give or take case. Anything else (an underscore, a dot) means the
-// slug is a lossy artifact and the name needs the hash.
-func plain(s string) bool {
-	return strings.IndexFunc(s, func(c rune) bool {
-		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-')
-	}) < 0
 }

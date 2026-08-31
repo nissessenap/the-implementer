@@ -1,7 +1,8 @@
 # Stage 80's sandbox, and the reason the chart has a `sandbox.script` seam: this
 # runs in a Job that charts/orchestrator and the Go builder produced between them,
 # in place of the phase script the real image bakes in. 80-orchestrator.sh
-# substitutes __PUSH_PROBE__.
+# substitutes __CLONE_REPO__ and appends orchestrator-push-probe.sh when there is a
+# credential to push with.
 #
 # It holds no credential. Everything below arrives from the builder's environment:
 # the run secret is userinfo in $https_proxy, the GitHub credential is a sentinel,
@@ -74,7 +75,3 @@ git clone --depth 1 -q "https://github.com/__CLONE_REPO__.git" "$WORKSPACE/clone
 echo "PROBE git-clone        ok   (__CLONE_REPO__, over the proxy's intercepted TLS)"
 
 echo "the orchestrator built this Job and the sandbox held no credential of its own"
-
-# The write path, appended by the stage rather than substituted: sed replaces one
-# line with one line, and this half is a script.
-__PUSH_PROBE__

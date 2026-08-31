@@ -112,10 +112,12 @@ func TestRunIdentityIsWrittenTwice(t *testing.T) {
 func TestSandboxTrustVariables(t *testing.T) {
 	j, _ := build(t)
 	env := envOf(j)
-	if len(trustVars) != 7 {
-		t.Errorf("ADR 0001's seam is seven variables, this is %d", len(trustVars))
-	}
-	for _, v := range trustVars {
+	// Literal, and not a loop over trustVars: that would assert the list against
+	// itself. This is the list, and dropping one from the builder fails here.
+	for _, v := range []string{
+		"SSL_CERT_FILE", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE", "PIP_CERT",
+		"REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+	} {
 		if env[v] != trustBundle {
 			t.Errorf("%s = %q, want the bundle %q", v, env[v], trustBundle)
 		}
@@ -235,9 +237,9 @@ func TestTemplateSurvivesTheBuilder(t *testing.T) {
 	if j.Spec.ActiveDeadlineSeconds == nil || *j.Spec.ActiveDeadlineSeconds != 3600 {
 		t.Error("activeDeadlineSeconds did not survive")
 	}
-	// The template's own env survives alongside the builder's, and the builder
-	// wins on a name they share rather than leaving a duplicate for the kubelet
-	// to resolve.
+	// The template's own env survives alongside the builder's, and the two sets
+	// are disjoint — a name in both would leave a duplicate for the kubelet to
+	// resolve, which is defined nowhere either of us can cite.
 	env := envOf(j)
 	if env["HOME"] != "/home/agent" || env["GIT_AUTHOR_NAME"] != "the-implementer" {
 		t.Error("the template's env did not survive")

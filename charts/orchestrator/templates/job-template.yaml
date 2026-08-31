@@ -93,8 +93,8 @@ data:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
               env:
-                - { name: HOME, value: {{ .Values.sandbox.home | quote }} }
-                - { name: WORKSPACE, value: {{ .Values.sandbox.workspace | quote }} }
+                - { name: HOME, value: "/home/agent" }
+                - { name: WORKSPACE, value: "/workspace" }
                 # The agent CLI refuses --dangerously-skip-permissions as uid 0 unless
                 # it is in a deliberate sandbox. A gVisor Job is one. Harmless at 1000.
                 - { name: IS_SANDBOX, value: "1" }
@@ -119,12 +119,12 @@ data:
                 - { name: CLOUD_ML_REGION, value: {{ .Values.vertex.region | quote }} }
                 {{- end }}
               volumeMounts:
-                - { name: home, mountPath: {{ .Values.sandbox.home | quote }} }
+                - { name: home, mountPath: "/home/agent" }
                 # Where the trust bundle is assembled: /etc/ssl/certs is read-only
                 # under readOnlyRootFilesystem, so this mount is what makes the CA
                 # usable at all.
                 - { name: tmp, mountPath: /tmp }
-                - { name: workspace, mountPath: {{ .Values.sandbox.workspace | quote }} }
+                - { name: workspace, mountPath: "/workspace" }
                 - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
               resources: {{ toYaml .Values.sandbox.resources | nindent 18 }}
           volumes:

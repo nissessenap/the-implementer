@@ -40,38 +40,22 @@ trap 'rm -f "$TMPL" "$PROBE"' EXIT
 # the builder.
 RUN_REPO=${E2E_GITHUB_REPO:-$CLONE_REPO}
 
-# Does the proxy hold a GitHub credential? Read off the Deployment, because either
-# stage 50 (static token) or stage 60 (minted as an App) may have put one there and
-# this stage must not install one itself — the two are not interchangeable and the
-# chart refuses to render both.
-CRED=$(kubectl -n "$NS" get "deploy/$RELEASE" -o \
-  jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GITHUB_TOKEN_FILE")].name}{.spec.template.spec.containers[0].env[?(@.name=="GITHUB_APP_ID")].name}' 2>/dev/null || true)
-
-if [[ -n $CRED && -n ${E2E_GITHUB_REPO:-} ]]; then
-  # --dry-run still does the ref discovery and the authentication, which is the
-  # whole of what is under test; a clone of a public repository never
-  # authenticates, so this is the assertion that the write path works.
-  PUSH_PROBE=$(cat <<'PUSH'
-# 6. The write path, with a credential the proxy holds and this pod does not. The
-#    branch is the one the run plan would push: implementer/issue-<n>.
-git clone --depth 1 -q "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "$WORKSPACE/auth" \
-  || { echo "!!! FAIL: clone of $REPO through the sentinel swap failed"; exit 1; }
-cd "$WORKSPACE/auth"
-git push --dry-run origin "HEAD:refs/heads/implementer/issue-$ISSUE" \
-  || { echo "!!! FAIL: push-dry-run through the swap failed"; exit 1; }
-echo "PROBE git-push-dry-run ok   (implementer/issue-$ISSUE, git-receive-pack authenticated)"
-PUSH
-)
+# The probe, plus the write half when there is a repository to push to *and* a
+# proxy holding a credential to push with. That second half is read off the
+# Deployment, because either stage 50 (static token) or stage 60 (minted as an App)
+# may have put one there and this stage must not install one itself — the two are
+# not interchangeable and the chart refuses to render both.
+#
+# Two files concatenated rather than one substituted: sed replaces one line with
+# one line, and quoting a shell script through its replacement syntax is how a
+# probe stops being readable.
+sed "s|__CLONE_REPO__|$CLONE_REPO|g" "$E2E_DIR/orchestrator-probe.sh" > "$PROBE"
+if [[ -n ${E2E_GITHUB_REPO:-} ]] &&
+  kubectl -n "$NS" get "deploy/$RELEASE" -o yaml 2>/dev/null | grep -qE 'GITHUB_TOKEN_FILE|GITHUB_APP_ID'; then
+  cat "$E2E_DIR/orchestrator-push-probe.sh" >> "$PROBE"
 else
-  PUSH_PROBE='echo "PROBE git-push-dry-run skipped (no credentialed proxy and E2E_GITHUB_REPO — run stage 50 or 60)"'
+  echo 'echo "PROBE git-push-dry-run skipped (no credentialed proxy and E2E_GITHUB_REPO — run stage 50 or 60)"' >> "$PROBE"
 fi
-
-# The push half is appended rather than substituted: sed replaces one line with one
-# line, and quoting a shell script through its replacement syntax is how a probe
-# stops being readable.
-sed -e "s|__CLONE_REPO__|$CLONE_REPO|g" -e '/^__PUSH_PROBE__$/d' \
-  "$E2E_DIR/orchestrator-probe.sh" > "$PROBE"
-printf '%s\n' "$PUSH_PROBE" >> "$PROBE"
 
 stage "install charts/orchestrator"
 # The chart renders the Job template, the ServiceAccount and the Role. Resources

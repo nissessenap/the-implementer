@@ -126,10 +126,14 @@ func (c Config) Build(r proxy.Run) *batchv1.Job {
 	j.Labels = merge(j.Labels, lbl)
 	j.Spec.Template.Labels = merge(j.Spec.Template.Labels, lbl)
 
+	// ponytail: appended, not merged. No template the chart renders sets a name
+	// the builder owns, so there is nothing to resolve — the day one does, the
+	// kubelet's behaviour on a duplicate is defined nowhere either of us can cite
+	// and this wants a drop-what-we-own pass before the append.
 	env := c.env(r)
 	for i := range j.Spec.Template.Spec.Containers {
 		ct := &j.Spec.Template.Spec.Containers[i]
-		ct.Env = append(dropOwned(ct.Env, env), env...)
+		ct.Env = append(ct.Env, env...)
 	}
 	return j
 }
@@ -213,23 +217,6 @@ func Create(ctx context.Context, c kubernetes.Interface, j *batchv1.Job, dryRun 
 		return false, nil
 	}
 	return err == nil, err
-}
-
-// dropOwned removes the template's entries for names the builder owns, so "the
-// builder wins" is this function rather than the kubelet's behaviour on a
-// duplicate — which is defined nowhere either of us can cite.
-func dropOwned(have, own []corev1.EnvVar) []corev1.EnvVar {
-	owned := make(map[string]bool, len(own))
-	for _, v := range own {
-		owned[v.Name] = true
-	}
-	var out []corev1.EnvVar
-	for _, v := range have {
-		if !owned[v.Name] {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 func merge(into, from map[string]string) map[string]string {

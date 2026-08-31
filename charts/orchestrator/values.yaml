@@ -60,8 +60,9 @@ sandbox:
   # mounts root:root 0755.
   uid: 1000
 
-  home: /home/agent
-  workspace: /workspace
+  # ponytail: $HOME and $WORKSPACE are literals in the Job template, not values —
+  # the image bakes both paths and nothing sets them. Values when a second image
+  # needs different ones.
 
   resources:
     requests: { cpu: 500m, memory: 1Gi }
