@@ -1,0 +1,35 @@
+# The orchestrator's whole cluster access for this ticket: create a Job, and read
+# the Jobs it created, in its own namespace. Nothing cluster-scoped and no
+# Secrets — ADR 0005 moved the sandbox's credential to the proxy, which deleted
+# the per-run Secret, its ownerReference and its orphan sweep from this component.
+#
+# `get` and `list` are not decoration: `get` is what a swallowed AlreadyExists is
+# worth reading after, and `list` is ADR 0004's restart-is-a-relist. `watch` is
+# not here — the informer that needs it watches **Pods**, and that is the ticket
+# after this one.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}
+    namespace: {{ .Release.Namespace }}

@@ -32,13 +32,31 @@ stage() { printf '\n=== %s: %s\n' "$(basename "$0")" "$*" >&2; }
 # mount and neither of them ships.
 RUN_KEY=${RUN_KEY:-e2e-shared-run-key-not-a-real-one}
 
+# run_key_file — RUN_KEY as a file, because that is how both binaries read it:
+# RUN_KEY_FILE, in the proxy and in the orchestrator alike. One mechanism, and a
+# key in a process environment is a key in every child's.
+#
+# ponytail: a fixed path rather than mktemp, so a full run reuses one file instead
+# of leaking one per stage — lib.sh has exactly one EXIT trap and it is already
+# spoken for. A real cleanup stack here is what a third litter-producing helper
+# wants, and openbao_up says the same thing.
+RUN_KEY_PATH=${RUN_KEY_PATH:-${TMPDIR:-/tmp}/implementer-e2e-run-key}
+run_key_file() {
+  ( umask 077; printf '%s' "$RUN_KEY" > "$RUN_KEY_PATH" )
+  echo "$RUN_KEY_PATH"
+}
+
 # run_cred <owner> <repo> <issue> <run-uid> — the userinfo the orchestrator puts in
 # the sandbox's https_proxy URL. Recomputed by the proxy from the pod's own
 # annotations, so the two agreeing is the whole authentication.
+#
+# Derived by the orchestrator's own binary and not by an `openssl dgst -hmac`
+# here. That is the point of #70 building the Job builder first: the derivation is
+# proxy.Cred, exported for exactly this consumer, and a second implementation in
+# bash is a second thing that can drift — silently, because a wrong HMAC and a
+# wrong key look identical in a 407.
 run_cred() {
-  local user="$1,$2,$3,$4"
-  printf '%s:%s' "$user" \
-    "$(printf '%s' "$user" | openssl dgst -sha256 -hmac "$RUN_KEY" -r | cut -d' ' -f1)"
+  RUN_KEY_FILE=$(run_key_file) go run "$E2E_DIR/../cmd/orchestrator" cred "$1" "$2" "$3" "$4"
 }
 
 # The worthless string the sandbox holds where the GitHub credential would be, and
@@ -67,7 +85,7 @@ runtime_class_line() {
 # pod, print its logs, and fail the stage unless it succeeded. Each KEY=value
 # replaces __KEY__ in the manifest, on top of __RUNTIME_CLASS__.
 run_job() {
-  local job=$1 manifest=$2 rcl phase= kv
+  local job=$1 manifest=$2 rcl kv
   shift 2
   rcl=$(runtime_class_line)
   local -a subst=(-e "s|__RUNTIME_CLASS__|$rcl|")
@@ -79,6 +97,14 @@ run_job() {
   # Succeeded one would report the stage green without the fixture having run.
   kubectl -n "$NS" delete job "$job" --ignore-not-found --cascade=foreground --wait >/dev/null
   sed "${subst[@]}" "$manifest" | kubectl apply -n "$NS" -f - >/dev/null
+  wait_job "$job"
+}
+
+# wait_job <name> — wait for a Job's single pod, print its logs, and fail unless it
+# succeeded. Split out of run_job for stage 80, whose Job is created by the
+# orchestrator's own binary rather than applied from a fixture.
+wait_job() {
+  local job=$1 phase=
 
   # Polled rather than `kubectl wait --for=condition=Complete`, which blocks for
   # the full timeout when the Job fails — the case whose logs we want soonest.

@@ -48,11 +48,11 @@ export KUBECONFIG=…; make e2e       # or any cluster you already have
 RUNTIME_CLASS=gvisor make e2e       # gVisor, where a RuntimeClass exists
 ```
 
-It needs `kubectl`, `helm`, `docker`, `openssl` and Go on `PATH` — `openssl`
-because the harness plays the orchestrator and derives each fixture's run
-credential, and Go because the
-proxy image is built with [ko](https://ko.build) (`make image`), which needs
-nothing installed itself. The harness is
+It needs `kubectl`, `helm`, `docker`, `openssl` and Go on `PATH` — `openssl` for
+the certificate and key-wrapping stages, and Go both because the proxy image is
+built with [ko](https://ko.build) (`make image`), which needs nothing installed
+itself, and because the harness now derives each fixture's run credential by
+running `orchestrator cred` rather than reimplementing the HMAC in shell. The harness is
 `KUBECONFIG`-driven and assumes nothing else about the cluster's flavour but one
 thing: from the proxy stage on it builds an image, which has to reach the
 cluster's nodes somehow. That is a single variable — kind by default, anything
@@ -89,6 +89,15 @@ against a mock Vertex, behind the proxy's `vertex.upstream` seam, and asserts th
 wiring — base URL, path rewrite, a credential arriving on a request that carried
 none, and SSE deltas arriving spread out rather than in one buffered lump. ADR
 0005 says why it is a mock, and the refusals are `go test ./proxy`'s.
+
+The **orchestrator** stage is the last one, and it is the only one whose Job no
+fixture describes: the binary builds it, `charts/orchestrator` renders its PodSpec,
+and the pod reaches the proxy with a credential the builder derived and nothing of
+its own. It asks the apiserver the two questions no amount of reasoning about
+DNS-1123 settles — that a name past 63 characters is truncated-and-hashed into
+something it accepts, and that two repository names differing only in a
+normalisation the slug flattens get *different* Jobs. Its clone half needs no
+credential; its push half runs when stage 50 or 60 has left one in the proxy.
 
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
 cache and refresh, the GAR attach and the model route's rewrite and streaming — is

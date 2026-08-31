@@ -1,0 +1,6 @@
+apiVersion: v2
+name: implementer-orchestrator
+description: The orchestrator — it creates exactly one object per run, and the run's PodSpec is here rather than in Go.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
