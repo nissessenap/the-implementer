@@ -72,10 +72,10 @@ func WatchPods(ctx context.Context, c kubernetes.Interface, ns string) (*Pods, e
 
 // terminated is "this pod no longer holds its IP". The CNI releases the address
 // when the sandbox is torn down, but the Pod object keeps status.podIP until it is
-// deleted — and finished run pods are retained on purpose (proto/job.yaml keeps
-// them a day, so pods/log stays readable). Without this a recycled IP indexes two
-// pods, p.pod refuses the ambiguity, and the *new* run is locked out for as long
-// as the old one is kept.
+// deleted — and finished run pods are retained on purpose (the chart's
+// ttlSecondsAfterFinished keeps them a day, so pods/log stays readable). Without
+// this a recycled IP indexes two pods, p.pod refuses the ambiguity, and the *new*
+// run is locked out for as long as the old one is kept.
 //
 // Phase, and only the terminal ones. Not DeletionTimestamp: that is set when
 // graceful termination *begins*, while the containers still run and the run is

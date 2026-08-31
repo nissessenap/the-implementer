@@ -45,6 +45,11 @@ sandbox:
   # The sandbox image. No default: an image is a matched pair with the
   # orchestrator, so there is nothing sensible to guess. ADR 0003's per-toolchain
   # mapping is a later ticket; this is the one image today.
+  #
+  # Ours is built from `sandbox/` and published as
+  # ghcr.io/nissessenap/implementer-base — pin the digest the publishing workflow
+  # printed, not the moving :v1, because a tag can be re-pushed and the run records
+  # what it actually ran. `make sandbox-image` builds it locally.
   image: ""
 
   # gVisor, and it is load-bearing rather than defence-in-depth — it is what makes
@@ -64,9 +69,13 @@ sandbox:
   # the image bakes both paths and nothing sets them. Values when a second image
   # needs different ones.
 
+  # ephemeral-storage alongside memory, because the three emptyDir volumes count
+  # against it and the run plan writes one unbounded stream-json transcript per
+  # phase into $WORKSPACE next to the clone and whatever the phases left behind.
+  # Without a limit a runaway phase fills the node and evicts its neighbours.
   resources:
-    requests: { cpu: 500m, memory: 1Gi }
-    limits: { memory: 6Gi }
+    requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi }
+    limits: { memory: 6Gi, ephemeral-storage: 20Gi }
 
   # The e2e seam, and the one knob here that is not for operators: it replaces the
   # image's phase script with an inline shell script, so a stage can run a probe

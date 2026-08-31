@@ -345,8 +345,8 @@ image, and not an initContainer:
 - An initContainer buys nothing here and costs a shared `emptyDir` plus a second
   home for the same three lines. The phase script is already baked into the image
   and already versioned as a pair with the orchestrator, so it is the cheaper
-  place for a three-line concatenation. Verified in `proto/phase.sh` on the
-  [credential-proxy prototype][proxyproto].
+  place for a three-line concatenation. Verified on the [credential-proxy
+  prototype][proxyproto] and shipped as `sandbox/phase.sh`.
 
 Two consequences for the contract. The base image must carry a system CA bundle at
 `/etc/ssl/certs/ca-certificates.crt` — implied by glibc plus `ca-certificates`, now

@@ -6,7 +6,7 @@
 #   ./proto/dind.sh
 #
 # Requires the gvisor-dind RuntimeClass (handler runsc-dind, configured with
-# -net-raw and -allow-packet-socket-write). See proto/README.md.
+# -net-raw and -allow-packet-socket-write). See docs/research/prototype-findings.md.
 set -euo pipefail
 
 # RUNTIME=gvisor tests whether the extra -net-raw/-allow-packet-socket-write
@@ -32,7 +32,7 @@ case $SERVER in
 esac
 
 kubectl get runtimeclass "$RUNTIME" >/dev/null || {
-  echo "no $RUNTIME RuntimeClass — see proto/README.md" >&2; exit 1; }
+  echo "no $RUNTIME RuntimeClass — see docs/research/prototype-findings.md" >&2; exit 1; }
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait >/dev/null
 

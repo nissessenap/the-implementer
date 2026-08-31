@@ -16,7 +16,7 @@ import (
 
 // maxName is the cap, and it is not metadata.name's 253. The Job controller
 // stamps the name into `spec.template`'s labels, and a label *value* caps at 63 —
-// measured against k3s in proto/jobname.sh, where the apiserver's rejection names
+// measured against k3s in the prototype, where the apiserver's rejection names
 // no cause an operator would recognise.
 const maxName = 63
 

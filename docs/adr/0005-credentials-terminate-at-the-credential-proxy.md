@@ -432,7 +432,7 @@ allowlist. But proxy environment variables are **best-effort routing**. What
   the GitHub token as a mounted file at `/run/secrets/gh/token` rather than an
   environment variable, to close the `/proc/self/environ` channel. Once the
   value is a worthless sentinel there is nothing to protect: `GH_TOKEN` is a
-  plain environment variable again, and `proto/phase.sh` builds
+  plain environment variable again, and `sandbox/phase.sh` builds
   `https://x-access-token:${GH_TOKEN}@github.com/…` unchanged. **The seam
   behaved exactly as predicted — the phase script's credential path never
   changed.**

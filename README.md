@@ -38,6 +38,8 @@ Nothing architectural is still open. Egress allowlisting and `NetworkPolicy` enf
 
 Your organization probably has multiple languages, and what's pre-installed in a sandbox is up to you. The strategy is settled in [ADR 0001](docs/adr/0001-sandbox-image-strategy-and-byo-contract.md): one small base image, with per-language images as short derivatives, rather than the field's usual multi-language base plus a setup script. The BYO-image contract is the base Dockerfile itself, and it is deliberately small.
 
+The base image lives in [`sandbox/`](sandbox/): the `Dockerfile` that *is* the contract, the run plan the pod executes as its `command`, and the schemas its phases report through. `make sandbox-image` builds it; a `v*` tag publishes `ghcr.io/nissessenap/implementer-base` and prints the digest, because nothing inside the image floats and Helm defaults to the immutable reference.
+
 Two hard constraints are already known. **The sandbox must run as a non-root user** — bubblewrap fails outright as uid 0 under gVisor. And it must **trust a private CA**, because the proxy terminates TLS for GitHub and the package registries; that turns out to need seven environment variables rather than one, since six of them *replace* the system trust store rather than adding to it.
 
 ## Running the e2e
