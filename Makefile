@@ -1,4 +1,4 @@
-.PHONY: e2e kind-up test image
+.PHONY: e2e kind-up test image sandbox-image
 
 # Stages run in filename order. Later tickets add a file; this needs no edit.
 e2e:
@@ -66,3 +66,17 @@ GO_TAGS ?= ghait.gcp,ghait.no_file
 # so `go test`, `go vet` and this target can all be handed the same tag set.
 image:
 	@GOFLAGS="-tags=$(GO_TAGS)" $(KO) build --bare ./cmd/proxy
+
+# The sandbox base image — ADR 0001's BYO contract, built from sandbox/Dockerfile.
+# The tag versions the agent CLI and the baked plugins together, and the image is a
+# matched, digest-pinned pair with the orchestrator: nothing inside it floats.
+#
+# This target is the local build. The published one is
+# .github/workflows/sandbox-image.yaml, which pushes the moving :v1 and the
+# immutable :v1.2.3 and prints the digest Helm should pin — a `docker push` from a
+# laptop would be a second, unpinnable way to publish the same name.
+SANDBOX_IMAGE ?= ghcr.io/nissessenap/implementer-base
+SANDBOX_TAG ?= dev
+
+sandbox-image:
+	docker build -t $(SANDBOX_IMAGE):$(SANDBOX_TAG) sandbox

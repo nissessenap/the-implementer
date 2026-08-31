@@ -116,7 +116,7 @@ name = trim(slug[:54]) + "-" + hash
 ```
 
 Two things about this are not obvious and were measured rather than assumed
-(`proto/jobname.sh`, dry-run against k3s):
+(dry-run against k3s in the prototype, now `e2e/80-orchestrator.sh`):
 
 - **63 characters is the cap, and the rejection comes from
   `spec.template.labels`, not `metadata.name`.** The Job controller stamps the

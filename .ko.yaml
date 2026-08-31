@@ -8,7 +8,7 @@
 defaultBaseImage: cgr.dev/chainguard/static
 
 builds:
-  # Named explicitly, because `proto/` holds prototype main packages too and the
-  # one shipped binary should never be a matter of which one ko found first.
+  # Named explicitly: the one shipped binary should never be a matter of which
+  # main package ko found first.
   - id: proxy
     main: ./cmd/proxy

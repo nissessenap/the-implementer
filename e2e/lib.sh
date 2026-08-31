@@ -71,7 +71,7 @@ SENTINEL='proxy-injected--------------------------'
 # left empty: runtimeClassName is a *string, and "" is not a DNS subdomain.
 runtime_class_line() {
   if [[ -n ${RUNTIME_CLASS:-} ]]; then
-    # Checked up front, as proto/go.sh did: a RuntimeClass the cluster does not
+    # Checked up front, as the prototype did: a RuntimeClass the cluster does not
     # have leaves the pod unschedulable and the poll below spends its whole
     # timeout on it.
     kubectl get runtimeclass "$RUNTIME_CLASS" >/dev/null

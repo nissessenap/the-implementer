@@ -14,6 +14,48 @@ The five canonical triage roles, used as-is (`needs-triage`, `needs-info`, `read
 
 Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### The sandbox image and the run plan
+
+`sandbox/` is ADR 0001's BYO contract as code: `Dockerfile` (the contract itself),
+`phase.sh` (the run plan, and the pod's `command`), the two output schemas, and
+`result.go` — the shape of the `/dev/termination-log` blob, which is now an
+interface rather than a convenience.
+
+```sh
+make sandbox-image                 # local build; publishing is the v* tag workflow
+go test ./sandbox                  # the whole run plan, offline, in ~2s
+```
+
+The test runs the shipped `phase.sh` with `claude` and `gh` stubbed and **`git`
+real**, against a bare repository in a temp dir — the clone URL is redirected with
+git's own `insteadOf`, so nothing in the script bends for the test. That covers the
+blob's shape and escaping, the `is_error` rule, a dead review phase leaving the
+branch pushed at `completed_unreviewed`, and the commits-and-clean assertion per
+review phase.
+
+What it cannot cover is a run that costs money. Two ways to do that one:
+
+- **In the cluster**, which is the real thing: `make sandbox-image`, load the image,
+  install `charts/proxy` and `charts/orchestrator` with `sandbox.image` pinned, then
+  `orchestrator run owner/repo#N`. The blob lands in the pod's termination message
+  and the transcript in `kubectl logs`.
+- **Under plain `docker run`**, which is how the run plan was measured in the first
+  place and needs no cluster. ⚠️ There is no proxy in this mode, so the sandbox
+  really does hold both credentials — use a scratch repo:
+
+```sh
+docker run --rm --tmpfs /workspace --tmpfs /tmp --tmpfs /home/agent \
+  -e REPO=me/scratch -e ISSUE=1 -e HOME=/home/agent -e WORKSPACE=/workspace \
+  -e TERM_LOG=/tmp/result.json -e IS_SANDBOX=1 -e TOOLCHAIN=go \
+  -e GIT_AUTHOR_NAME=the-implementer -e GIT_AUTHOR_EMAIL=t@example.com \
+  -e GIT_COMMITTER_NAME=the-implementer -e GIT_COMMITTER_EMAIL=t@example.com \
+  -e GH_TOKEN="$(gh auth token)" -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+  ghcr.io/nissessenap/implementer-base:dev
+```
+
+Both need a repository whose `implementer/` branch prefix you are happy to have
+pushed to. Expect ~450s and ~$2 for three phases against a small repo.
+
 ### Running the credentialed e2e stages
 
 Stage 50 needs a real GitHub token. `gh auth token` prints the logged-in one, so

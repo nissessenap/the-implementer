@@ -286,9 +286,10 @@ either by deriving from the base image or by copying its `RUN` lines into their
 own hardened base.
 
 **Preflight** — the phase script's first act: verifying the image contract
-(`command -v` for the agent CLI, `git`, `gh`, the script itself) and failing to
-`/dev/termination-log` with a readable message. Exists so a non-conforming image
-fails loudly rather than mysteriously.
+(`command -v` for the agent CLI, `git`, `gh`, `jq`, `bubblewrap`; the skills the run
+plan invokes and the schemas it hands them; a writable result channel) and failing
+to `/dev/termination-log` with a readable message. Exists so a non-conforming image
+fails loudly rather than mysteriously, before a run spends anything.
 
 **Matched pair** — the orchestrator and the sandbox image are versioned and
 released together, and pinned by digest. The phase script lives in the image, so
@@ -314,6 +315,18 @@ survives the ephemeral `HOME`.
 structured result via `/dev/termination-log`, surfaced on pod status; the full
 transcript via `pods/log`. Both are pod-level, which is why the orchestrator's
 informer watches Pods rather than Jobs.
+
+**Result blob** — the JSON the phase script accumulates and writes once onto
+`/dev/termination-log`: overall status, branch, commit count, summed cost, elapsed,
+`pr_title` and a status/summary line per phase. An interface rather than a
+convenience, because the orchestrator's PR builder is its consumer — typed in
+`sandbox/result.go`, bounded field by field so the kubelet's blind 4096-byte
+truncation cannot corrupt it.
+
+**`completed_unreviewed`** — the run status when the implement phase landed and a
+review phase died. Nothing gates the pull request: the branch is pushed anyway and
+the dead phase is named in the blob, because discarding a ~$1 implement phase
+because a 529 hit the reviewer is the expensive failure.
 
 **Resume seam** — the one obligation trigger #3 (PR-review feedback) places on
 v1: the workspace and `HOME` mounts stay *swappable* from `emptyDir` to a PVC, and

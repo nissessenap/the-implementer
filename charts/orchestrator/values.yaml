@@ -45,6 +45,11 @@ sandbox:
   # The sandbox image. No default: an image is a matched pair with the
   # orchestrator, so there is nothing sensible to guess. ADR 0003's per-toolchain
   # mapping is a later ticket; this is the one image today.
+  #
+  # Ours is built from `sandbox/` and published as
+  # ghcr.io/nissessenap/implementer-base — pin the digest the publishing workflow
+  # printed, not the moving :v1, because a tag can be re-pushed and the run records
+  # what it actually ran. `make sandbox-image` builds it locally.
   image: ""
 
   # gVisor, and it is load-bearing rather than defence-in-depth — it is what makes
