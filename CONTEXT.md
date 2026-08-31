@@ -320,7 +320,7 @@ informer watches Pods rather than Jobs.
 `/dev/termination-log`: overall status, branch, commit count, summed cost, elapsed,
 `pr_title` and a status/summary line per phase. An interface rather than a
 convenience, because the orchestrator's PR builder is its consumer — typed in
-`sandbox/result.go`, bounded field by field so the kubelet's blind 4096-byte
+`sandbox/phase_test.go`, bounded field by field so the kubelet's blind 4096-byte
 truncation cannot corrupt it.
 
 **`completed_unreviewed`** — the run status when the implement phase landed and a

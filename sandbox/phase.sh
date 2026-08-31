@@ -12,7 +12,7 @@
 # It says little. The transcript is the observability channel (architecture §6,
 # `pods/log` carrying stream-json), and the *result* channel is one JSON blob on
 # /dev/termination-log, accumulated here and written once — the shape architecture
-# §3 fixes, consumed by the orchestrator's PR builder, typed in sandbox/result.go.
+# §3 fixes, consumed by the orchestrator's PR builder and decoded in phase_test.go.
 set -eu
 
 REPO=${REPO:?REPO=owner/name required}
@@ -244,7 +244,7 @@ run_phase() {
     PH_STATUS=not_committed
     PH_SUMMARY="reported fixes but committed nothing. ${PH_SUMMARY}"
   fi
-  _cost=$(printf '%s' "${_result:-{\}}" | jq -r '.total_cost_usd // 0')
+  _cost=$(printf '%s' "$_result" | jq -r '.total_cost_usd // 0')
   COST_TOTAL=$(jq -n --argjson a "$COST_TOTAL" --argjson b "${_cost:-0}" '$a + $b')
   PHASES_JSON=$(jq -c -n --argjson p "$PHASES_JSON" \
     --arg name "$PHASE" --arg status "$PH_STATUS" --arg summary "$PH_SUMMARY" \
@@ -333,7 +333,7 @@ The skill only lists what to cut. When it has listed, apply the cuts:
 PONYTAIL_STATUS=$PH_STATUS
 
 # The run's verdict, which is one of exactly four values — `completed`, `blocked`,
-# `failed`, `completed_unreviewed` (sandbox/result.go). A *phase* status is a richer
+# `failed`, `completed_unreviewed`. A *phase* status is a richer
 # thing (`dirty`, `not_committed`, `error`, `no_result`, `unknown`) and stays in
 # `phases`, where the orchestrator's comment names it; letting one leak up here
 # would hand the PR builder a case it has no branch for.
@@ -368,6 +368,5 @@ log "push ${BRANCH} (+${COMMITS} commits)"
 git push -q origin "$BRANCH" || die "push failed"
 
 # ------------------------------------------------------------------- report ---
-PHASE='done'
 report "$STATUS" "pushed ${BRANCH}"
 log "done: ${STATUS} ${BRANCH} +${COMMITS} commits \$${COST_TOTAL}"

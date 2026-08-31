@@ -17,9 +17,9 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/do
 ### The sandbox image and the run plan
 
 `sandbox/` is ADR 0001's BYO contract as code: `Dockerfile` (the contract itself),
-`phase.sh` (the run plan, and the pod's `command`), the two output schemas, and
-`result.go` — the shape of the `/dev/termination-log` blob, which is now an
-interface rather than a convenience.
+`phase.sh` (the run plan, and the pod's `command`), and the two output schemas. The
+shape of the `/dev/termination-log` blob is typed in `phase_test.go`, its only
+reader until the orchestrator's PR builder becomes the second one.
 
 ```sh
 make sandbox-image                 # local build; publishing is the v* tag workflow

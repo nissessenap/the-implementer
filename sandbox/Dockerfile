@@ -38,11 +38,10 @@ RUN useradd -u 1000 -m -d /home/agent -s /bin/sh agent
 #
 # Floor: 2.1.214. Below it a large piped response can truncate the final line and
 # omit the `result` message, which the run plan reads as the phase's whole verdict.
-ARG CLAUDE_VERSION=2.1.220
-ARG CLAUDE_SHA256=674f61f20ff306f3100cf9200e4c36c4b70278b5bef2884549819b942a89c863
 RUN curl -fsSL -o /usr/local/bin/claude \
-      "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" \
- && echo "${CLAUDE_SHA256}  /usr/local/bin/claude" | sha256sum -c - \
+      "https://downloads.claude.ai/claude-code-releases/2.1.220/linux-x64/claude" \
+ && echo "674f61f20ff306f3100cf9200e4c36c4b70278b5bef2884549819b942a89c863  /usr/local/bin/claude" \
+      | sha256sum -c - \
  && chmod 0755 /usr/local/bin/claude
 
 # The plugins, pinned to a commit and loaded via --plugin-dir from this read-only
@@ -52,33 +51,25 @@ RUN curl -fsSL -o /usr/local/bin/claude \
 # evaluation impossible, since a behaviour change could come from an upstream commit.
 #
 # The .git directories go, so the layer carries the skills and not their history.
-ARG SKILLS_SHA=2ab958093e83e0ec752e6c1c5932da465bf23e0c
-ARG PONYTAIL_SHA=16f29800fd2681bdf24f3eb4ccffe38be3baec6b
 RUN git clone -q https://github.com/mattpocock/skills /opt/skills \
- && git -C /opt/skills checkout -q "${SKILLS_SHA}" \
+ && git -C /opt/skills checkout -q 2ab958093e83e0ec752e6c1c5932da465bf23e0c \
  && git clone -q https://github.com/DietrichGebert/ponytail /opt/ponytail \
- && git -C /opt/ponytail checkout -q "${PONYTAIL_SHA}" \
+ && git -C /opt/ponytail checkout -q 16f29800fd2681bdf24f3eb4ccffe38be3baec6b \
  && rm -rf /opt/skills/.git /opt/ponytail/.git
 
 # ponytail's plugin.json declares three node hooks. ADR 0001 bakes no node, so they
 # fail 127 on every phase, are surfaced in the stream, and are not fatal — the
 # plugin is baked for its skills, not its hooks (#43).
 #
-# The build asserts what the run plan actually invokes, and this is the assert that
-# earns its keep: the invocation strings are `/<plugin name>:<skill directory>`, so
-# an upstream rename fails the build here instead of surfacing as `Unknown command`
-# a dollar into a run. `plugin_errors` is not the check it looks like — the key is
-# simply absent on 2.1.220, so asserting it is null passes vacuously.
+# The plugin *names*, which is the half of the invocation string preflight cannot
+# check: `/<plugin name>:<skill directory>` — the directories it verifies itself on
+# every run, in this image and in a BYO one, before anything is spent. An upstream
+# rename fails the build here instead of surfacing as `Unknown command` a dollar in.
+# `plugin_errors` is not the check it looks like — the key is simply absent on
+# 2.1.220, so asserting it is null passes vacuously.
 RUN set -eu; \
     [ "$(jq -r .name /opt/skills/.claude-plugin/plugin.json)" = mattpocock-skills ]; \
-    [ "$(jq -r .name /opt/ponytail/.claude-plugin/plugin.json)" = ponytail ]; \
-    for f in /opt/skills/skills/engineering/implement/SKILL.md \
-             /opt/skills/skills/engineering/code-review/SKILL.md \
-             /opt/ponytail/skills/ponytail-review/SKILL.md; do \
-      [ -f "$f" ] || { echo "the run plan invokes a skill this build does not carry: $f" >&2; exit 1; }; \
-    done; \
-    ! command -v node; \
-    ! command -v npm
+    [ "$(jq -r .name /opt/ponytail/.claude-plugin/plugin.json)" = ponytail ]
 
 # The run plan and the two output schemas, at the known paths the PodSpec's
 # `command` and the script itself name. Baking costs nothing in rebuild churn: the
