@@ -215,7 +215,7 @@ func Create(ctx context.Context, c kubernetes.Interface, j *batchv1.Job, dryRun 
 	opts := metav1.CreateOptions{}
 	if dryRun {
 		// Server dry-run, so the apiserver's own validation answers "would this
-		// name be accepted" — which is the question proto/jobname.sh asked k3s and
+		// name be accepted" — which is the question the prototype asked k3s and
 		// the one no amount of reasoning about DNS-1123 settles.
 		opts.DryRun = []string{metav1.DryRunAll}
 	}

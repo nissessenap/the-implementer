@@ -36,6 +36,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # Exactly these two, and no `latest`: the action's default flavor is
+          # `latest=auto`, which would publish a third, floating tag on an image
+          # whose whole posture is digest-pinning.
+          flavor: latest=false
           # The immutable reference and the moving major, from the tag itself. A
           # workflow_dispatch or a pull request gets neither and builds unpushed.
           tags: |
@@ -49,5 +53,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
       # The one line an operator needs: `sandbox.image` in charts/orchestrator.
-      - if: steps.build.outputs.digest != ''
+      # Gated on the same event as the push above: a pull-request build produces a
+      # digest too, and printing one for an image nobody can pull is worse than
+      # printing nothing.
+      - if: github.event_name == 'push'
         run: echo "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

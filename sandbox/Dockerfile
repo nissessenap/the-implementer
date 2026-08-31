@@ -15,7 +15,12 @@
 
 # glibc, because the claude binary is a dynamically-linked ELF against
 # /lib64/ld-linux-x86-64.so.2. Distroless is ruled out: no shell, no git, no gh.
-FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+#
+# --platform, because the agent CLI below is fetched as linux-x64 and its checksum
+# passes on any host: an arm64 laptop would otherwise build an image whose every
+# phase dies with an exec-format error the preflight cannot see. Emulated and
+# correct beats native and broken, and `make sandbox-image` is a documented path.
+FROM --platform=linux/amd64 debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 # ca-certificates puts the system bundle at /etc/ssl/certs/ca-certificates.crt,
 # which the phase script concatenates the proxy's CA onto. jq is the run plan's
