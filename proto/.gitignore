@@ -1,3 +1,4 @@
 .token
 .k3s.kubeconfig
 .vertex.env
+.run/
