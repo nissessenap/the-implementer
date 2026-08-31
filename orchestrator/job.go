@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"strings"
@@ -250,11 +251,9 @@ func Phase(ctx context.Context, c kubernetes.Interface, ns, name string) string 
 
 func merge(into, from map[string]string) map[string]string {
 	if into == nil {
-		into = map[string]string{}
+		into = make(map[string]string, len(from))
 	}
-	for k, v := range from {
-		into[k] = v
-	}
+	maps.Copy(into, from)
 	return into
 }
 

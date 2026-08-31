@@ -5,8 +5,20 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"github.com/nissessenap/the-implementer/proxy"
 )
+
+// isLabel is the apiserver's own check, not a copy of it: alphabet, the leading
+// and trailing character, and the 63-character cap in one call. A name this
+// rejects is a name `kubectl create` rejects.
+func isLabel(t *testing.T, name, why string) {
+	t.Helper()
+	if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
+		t.Errorf("JobName(%s) = %q: %s", why, name, strings.Join(errs, "; "))
+	}
+}
 
 func name(owner, repo, issue string) string {
 	return JobName(proxy.Run{Owner: owner, Repo: repo, Issue: issue, UID: "ignored"})
@@ -45,9 +57,8 @@ func TestJobNameSurvivesLossyNormalisation(t *testing.T) {
 		if a == b {
 			t.Errorf("%s and %s both got %q", p[0], p[1], a)
 		}
-		if len(a) > 63 || len(b) > 63 {
-			t.Errorf("%q (%d) / %q (%d) past the cap", a, len(a), b, len(b))
-		}
+		isLabel(t, a, p[0].String())
+		isLabel(t, b, p[1].String())
 	}
 	// The hash is over the raw identity, never the slug — hashing the lossy
 	// artifact would make both variants hash identically and defeat the point.
@@ -61,16 +72,13 @@ func TestJobNameSurvivesLossyNormalisation(t *testing.T) {
 // numeric, so the slug always ends in a digit — but JobName takes a bare Run and
 // the webhook front-end will build one from a payload.
 func TestJobNameIsAlwaysALabel(t *testing.T) {
-	label := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	for _, r := range []proxy.Run{
 		{Owner: "_", Repo: "_", Issue: "_"},
 		{},
 		{Owner: "..", Repo: "..", Issue: ".."},
 		{Owner: "acme", Repo: "widgets", Issue: "5"},
 	} {
-		if got := JobName(r); !label.MatchString(got) {
-			t.Errorf("JobName(%s) = %q is not a DNS-1123 label", r, got)
-		}
+		isLabel(t, JobName(r), r.String())
 	}
 }
 
@@ -86,9 +94,7 @@ func hashOf(n string) string {
 // apiserver with an error naming no cause an operator would recognise.
 func TestJobNameFitsTheLabelCap(t *testing.T) {
 	long := name("kubernetes-sigs", "cluster-api-provider-openstack-and-then-some-more-name", "12345")
-	if len(long) > 63 {
-		t.Errorf("JobName = %q, %d chars, cap is 63", long, len(long))
-	}
+	isLabel(t, long, "the long identity")
 	// The invariant is the cap and not equality with it: trimming a cut that landed
 	// on a '-' gives 62, which is correct. What must be true is that the name was
 	// truncated *and* hashed rather than merely cut, which is the suffix.
@@ -97,16 +103,6 @@ func TestJobNameFitsTheLabelCap(t *testing.T) {
 	}
 	if len(long) < 55 {
 		t.Errorf("JobName = %q is %d chars, so nothing was truncated", long, len(long))
-	}
-	// Still a DNS-1123 label: the truncation must not leave a trailing dash
-	// before the hash separator, and nothing outside [a-z0-9-].
-	for i, c := range long {
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
-			t.Errorf("JobName = %q: byte %d is %q", long, i, c)
-		}
-	}
-	if long[0] == '-' || long[len(long)-1] == '-' {
-		t.Errorf("JobName = %q starts or ends with a dash", long)
 	}
 }
 
