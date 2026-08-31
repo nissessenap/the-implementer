@@ -223,12 +223,22 @@ via `runtimeClassName` — and produces at most one branch. The Job name derives
 from the issue, which is what makes webhook redelivery idempotent. See
 [ADR 0002](docs/adr/0002-a-run-executes-as-a-kubernetes-job.md).
 
+**Job template** — the run's Job as a manifest the orchestrator's chart renders,
+patched rather than generated: the builder sets the name, writes run identity in
+both places, and appends the sandbox environment. Everything else — the sandbox
+posture, the image, the volumes, `activeDeadlineSeconds` — is a field in that
+manifest, which is what keeps uid 1000 and `runtimeClassName` out of Go.
+
 **Sandbox** — the isolated container a run executes in. Holds the checkout, the
 toolchain, and the agent CLI. Nothing in it survives the run.
 
 **Sandbox posture** — the security context a run executes under:
 `runtimeClassName: gvisor`, uid 1000, `seccompProfile: RuntimeDefault`,
-`readOnlyRootFilesystem: true`, all capabilities dropped, not privileged. gVisor is
+`readOnlyRootFilesystem: true`, all capabilities dropped, not privileged, and no
+ambient Kubernetes: `automountServiceAccountToken: false`, because a projected token
+is a bearer for the apiserver and a run talks to it never, and
+`enableServiceLinks: false`, because the alternative hands the sandbox an inventory
+of every Service in the namespace. gVisor is
 **load-bearing rather than defence-in-depth**: it is what makes `RuntimeDefault`
 compatible with `bubblewrap`, so the strictest Pod Security Standard and the image
 contract can coexist. Root is not a cheaper alternative — under gVisor,

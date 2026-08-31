@@ -52,6 +52,30 @@ E2E_GITHUB_APP_ID=… E2E_GITHUB_APP_KEY=~/.secrets/app.pem \
   E2E_GITHUB_REPO=me/scratch E2E_GITHUB_OTHER_REPO=me/other-private ./e2e/60-github-mint.sh
 ```
 
+Stage 80 is the orchestrator's, and its clone half never skips: the builder derives
+the run credential, `charts/orchestrator` renders the PodSpec, and the pod clones a
+public repository through the proxy holding nothing of its own. It installs the
+orchestrator chart itself and needs no credential for that half.
+
+Its **push** half is the one that needs one, and stage 80 deliberately does not
+install it — it reads off the proxy Deployment whether stage 50 or 60 left a GitHub
+credential there, because the static and minted ones are not interchangeable and the
+chart refuses to render both. So the full stage is:
+
+```sh
+E2E_GITHUB_TOKEN=$(gh auth token) E2E_GITHUB_REPO=me/scratch ./e2e/50-github-swap.sh
+E2E_GITHUB_REPO=me/scratch ./e2e/80-orchestrator.sh
+```
+
+`E2E_GITHUB_REPO` is the run's *identity* there, not just the push target: a minted
+token is scoped to the annotations rather than to the URL, so pushing anywhere else
+fails for a reason that has nothing to do with the builder. The anonymous clone uses
+`E2E_CLONE_REPO` (default `nissessenap/the-implementer`) instead, because the push
+target may be private.
+
+The harness no longer derives a run credential with `openssl` — `run_cred` shells out
+to `orchestrator cred`, so the HMAC has one implementation.
+
 There is no GAR e2e stage, deliberately: the proxy's Google identity is Workload
 Identity and the chart offers nowhere to mount a service account key, so a cluster
 with no metadata server cannot turn it on. Do not add one — `proxy/gar_test.go`

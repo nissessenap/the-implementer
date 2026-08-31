@@ -1,0 +1,137 @@
+{{- if not .Values.sandbox.image }}
+{{- /* No default is possible: ADR 0001 makes the image a matched pair with the
+       orchestrator, so a guess here would be a run against a contract nobody
+       checked. */}}
+{{- fail "sandbox.image is required: the sandbox image is a matched pair with the orchestrator, so there is nothing to default it to" }}
+{{- end }}
+{{- if and .Values.vertex.enabled (not .Values.vertex.projectId) }}
+{{- /* Refused rather than rendered: Claude Code builds the Vertex path out of the
+       project id, so an empty one is a 404 from Google twenty minutes into a run.
+       The proxy reads the location back off that path, which is why neither end
+       can supply this for the other. */}}
+{{- fail "vertex.enabled is set with no vertex.projectId: the model call's path is built from it" }}
+{{- end }}
+{{- if and .Values.vertex.projectId (not .Values.vertex.enabled) }}
+{{- /* A value that would quietly do nothing, which is how the proxy's chart
+       treats the same shape: this is either the wrong flag or the wrong value. */}}
+{{- fail "vertex.projectId is set with vertex.enabled false: the model route is off, so nothing reads it" }}
+{{- end }}
+# The run's Job, rendered here and patched there. The orchestrator sets the name,
+# writes run identity onto this Job *and* its pod template, and appends the
+# sandbox environment; everything in this file is the operator's.
+#
+# This is where ADR 0001's posture lives, and that is the point of it being a
+# manifest: `runtimeClassName`, the uid, the read-only rootfs and the dropped
+# capabilities are PodSpec fields, so none of them is a constant in Go.
+#
+# The proven shape is e2e/github-job.yaml and e2e/mint-job.yaml — the fixtures
+# that ticket deliberately produced as the reference PodSpec.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-job-template
+data:
+  job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata: {}
+    spec:
+      backoffLimit: {{ .Values.job.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+      template:
+        spec:
+          restartPolicy: Never
+          # The sandbox holds no credential, and a projected ServiceAccount token is
+          # one — a bearer for this cluster's apiserver, mounted by default, and
+          # invisible to a check that looks at env and Secret volumes. Nothing in the
+          # run talks to the apiserver: the result leaves through the termination
+          # message and the logs, both read from outside.
+          automountServiceAccountToken: false
+          # The kubelet's Service-discovery variables, off. They are not a
+          # credential, but they are an inventory of every Service in this namespace
+          # handed to the sandbox for nothing — the one address it needs arrives in
+          # `https_proxy` — and `CREDENTIAL_PROXY_PORT_8080_TCP_PORT` is
+          # indistinguishable from a leaked credential to anything grepping the
+          # environment, which the e2e probe does.
+          enableServiceLinks: false
+          {{- with .Values.sandbox.runtimeClassName }}
+          runtimeClassName: {{ . }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: {{ .Values.sandbox.uid }}
+            runAsGroup: {{ .Values.sandbox.uid }}
+            # What makes the emptyDir volumes below writable: an emptyDir mounts
+            # root:root 0755, so without this the run cannot write its own workspace.
+            fsGroup: {{ .Values.sandbox.uid }}
+            # Also satisfies Pod Security Standards `restricted`. On host runc this
+            # profile breaks bubblewrap by blocking unshare(CLONE_NEWUSER); under
+            # gVisor it is a no-op, because the sentry serves the syscall itself.
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: agent
+              image: {{ .Values.sandbox.image | quote }}
+              # ko-style digests and locally loaded images both want this; nothing
+              # newer ever appears under a pinned reference.
+              imagePullPolicy: IfNotPresent
+              {{- if .Values.sandbox.script }}
+              # The e2e seam — see values.yaml. A probe container in a Job this
+              # chart and the Go builder produced between them.
+              command: ["/bin/sh", "-eu", "-c"]
+              args:
+                - |
+                  {{- .Values.sandbox.script | nindent 22 }}
+              {{- else }}
+              # The phase script, baked into the image and versioned as a pair with
+              # the orchestrator. It takes its inputs from argv and env, which is
+              # what makes whatever invokes it swappable.
+              command: ["/usr/local/bin/phase.sh"]
+              {{- end }}
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                - { name: HOME, value: "/home/agent" }
+                - { name: WORKSPACE, value: "/workspace" }
+                # The agent CLI refuses --dangerously-skip-permissions as uid 0 unless
+                # it is in a deliberate sandbox. A gVisor Job is one. Harmless at 1000.
+                - { name: IS_SANDBOX, value: "1" }
+                # Versions are pinned and the rootfs is read-only.
+                - { name: DISABLE_AUTOUPDATER, value: "1" }
+                # All four: `git` treats author and committer as separate people.
+                - { name: GIT_AUTHOR_NAME, value: {{ .Values.git.authorName | quote }} }
+                - { name: GIT_AUTHOR_EMAIL, value: {{ .Values.git.authorEmail | quote }} }
+                - { name: GIT_COMMITTER_NAME, value: {{ .Values.git.authorName | quote }} }
+                - { name: GIT_COMMITTER_EMAIL, value: {{ .Values.git.authorEmail | quote }} }
+                {{- if .Values.vertex.enabled }}
+                # The model half. The base URL itself is the builder's — it is
+                # derived from proxyHost, and `no_proxy` has to name the same
+                # Service or the base URL is tunnelled through the proxy to the
+                # proxy. SKIP_VERTEX_AUTH is what makes the sandbox send the call
+                # unsigned: it holds no Google credential to sign it with.
+                - { name: CLAUDE_CODE_USE_VERTEX, value: "1" }
+                - { name: CLAUDE_CODE_SKIP_VERTEX_AUTH, value: "1" }
+                - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: {{ .Values.vertex.projectId | quote }} }
+                # Read back off the request path by the proxy, which is why it is
+                # constrained there to one DNS label's alphabet.
+                - { name: CLOUD_ML_REGION, value: {{ .Values.vertex.region | quote }} }
+                {{- end }}
+              volumeMounts:
+                - { name: home, mountPath: "/home/agent" }
+                # Where the trust bundle is assembled: /etc/ssl/certs is read-only
+                # under readOnlyRootFilesystem, so this mount is what makes the CA
+                # usable at all.
+                - { name: tmp, mountPath: /tmp }
+                - { name: workspace, mountPath: "/workspace" }
+                - { name: proxy-ca, mountPath: /run/proxy-ca, readOnly: true }
+              resources: {{ toYaml .Values.sandbox.resources | nindent 18 }}
+          volumes:
+            # Ephemeral, all three: dependency caches die with the pod, and nothing
+            # is stranded because the pod pushes its own branch.
+            - { name: home, emptyDir: {} }
+            - { name: tmp, emptyDir: {} }
+            - { name: workspace, emptyDir: {} }
+            - name: proxy-ca
+              configMap: { name: {{ .Values.proxyCAConfigMapName }} }

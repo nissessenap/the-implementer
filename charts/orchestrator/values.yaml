@@ -1,0 +1,94 @@
+# ponytail: this chart renders the run's Job template, a ServiceAccount and a
+# Role, and no Deployment — because there is nothing to deploy yet. The
+# orchestrator is a command line at this point, and its own four environment
+# variables (POD_NAMESPACE, PROXY_HOST, RUN_KEY_FILE, JOB_TEMPLATE_FILE) are
+# supplied by whoever runs it. They become values here when the webhook front-end
+# lands and there is a Deployment to put them on; putting them here first would be
+# two operator-facing values that nothing reads.
+#
+# PROXY_HOST is the credential proxy's Service name as the *sandbox* resolves it —
+# so a proxy in another namespace is `credential-proxy.other.svc.cluster.local`.
+# The port is never configured: the sandbox is handed an `https_proxy` URL naming
+# 8080, and a second place to change it is only a second place to get it wrong.
+#
+# RUN_KEY_FILE is the one long-lived key the run credential derives from, and the
+# proxy's chart mounts the same Secret (`runKeySecretName` there, key `key`).
+# Neither chart owns it. The orchestrator computes HMAC-SHA256(key, run) when it
+# builds the Job and the proxy recomputes it from the pod's annotations, so
+# nothing is handed between them and there is no per-run Secret.
+
+# The ConfigMap holding the CA that signed the proxy's serving certificate — only
+# the certificate; the key stays in the proxy's Secret. Mounted at
+# /run/proxy-ca/ca.crt, which the phase script concatenates onto the system roots
+# to make the bundle every trust variable points at. Not optional: the sandbox
+# reaches everything through the proxy, so a run without this CA verifies nothing.
+proxyCAConfigMapName: proxy-ca
+
+# The run's Job, as an operator's decisions rather than the orchestrator's. The
+# builder patches only what is per-run — the name, run identity in two places, and
+# the sandbox environment — so everything below is the whole of the posture.
+job:
+  # A run cannot be resumed, only re-created — the workspace is an emptyDir and the
+  # branch may already be pushed, so a retry would be a second run wearing the
+  # first one's identity and pushing over its work. A value because architecture
+  # §9 makes every knob one, not because raising it is a supported thing to do.
+  backoffLimit: 0
+
+  # Counts from Job.status.startTime, so Pending time burns the run deadline.
+  # ~6x headroom over a trivial three-phase run.
+  activeDeadlineSeconds: 3600
+  # A data-retention decision and not a tidiness one: deleting the Pod object
+  # makes `pods/log` return NotFound, and MVP retains the transcript nowhere else.
+  ttlSecondsAfterFinished: 86400
+
+sandbox:
+  # The sandbox image. No default: an image is a matched pair with the
+  # orchestrator, so there is nothing sensible to guess. ADR 0003's per-toolchain
+  # mapping is a later ticket; this is the one image today.
+  image: ""
+
+  # gVisor, and it is load-bearing rather than defence-in-depth — it is what makes
+  # `seccompProfile: RuntimeDefault` and bubblewrap coexist. k3s names the class
+  # after the containerd handler, so it lands as `runsc`; GKE needs a node pool
+  # with `--sandbox type=gvisor`. Empty runs on the host runtime, which is a
+  # deliberate downgrade and not a default worth having.
+  runtimeClassName: runsc
+
+  # The uid the run executes as, and it is a PodSpec field precisely so it is not
+  # a constant in the orchestrator's Go — a BYO image may ship another one.
+  # `fsGroup` is what makes the emptyDir volumes below writable by it: an emptyDir
+  # mounts root:root 0755.
+  uid: 1000
+
+  # ponytail: $HOME and $WORKSPACE are literals in the Job template, not values —
+  # the image bakes both paths and nothing sets them. Values when a second image
+  # needs different ones.
+
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { memory: 6Gi }
+
+  # The e2e seam, and the one knob here that is not for operators: it replaces the
+  # image's phase script with an inline shell script, so a stage can run a probe
+  # container in a Job this chart and this builder produced. e2e/80-orchestrator.sh
+  # is the only thing that sets it.
+  script: ""
+
+# Commit attribution. Here rather than in the builder because it is the operator's
+# identity, not the run's — and `git` needs all four: the author and committer are
+# separate people as far as it is concerned.
+git:
+  authorName: the-implementer
+  authorEmail: the-implementer@users.noreply.github.com
+
+# The model route. On, the sandbox is pointed at the proxy's `/vertex` and holds
+# no model credential at all — not blanked, absent. The base URL is derived from
+# proxyHost by the builder; these are the three things only the operator knows.
+#
+# The proxy's own chart must have `vertex.enabled` too, or the route is not there.
+vertex:
+  enabled: false
+  projectId: ""
+  # Vertex resolves `opus`/`sonnet` to its own defaults, so an operator who wants
+  # specific models pins them — that is model config and belongs with the images.
+  region: global

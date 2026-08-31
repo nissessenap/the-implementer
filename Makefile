@@ -32,6 +32,12 @@ test:
 	helm template charts/proxy --set githubApp.appId=1 --set-string githubApp.provider=vault \
 	  --set-string githubApp.key=transit/app --set-string githubApp.vault.addr=http://openbao:8200 \
 	  --set-string githubApp.vault.tokenSecretName=openbao-token >/dev/null
+	# And the orchestrator chart's, for the same reason. The e2e only ever renders
+	# the shape that works.
+	! helm template charts/orchestrator >/dev/null 2>&1
+	! helm template charts/orchestrator --set-string sandbox.image=i --set vertex.enabled=true >/dev/null 2>&1
+	! helm template charts/orchestrator --set-string sandbox.image=i --set-string vertex.projectId=p >/dev/null 2>&1
+	helm template charts/orchestrator --set-string sandbox.image=i >/dev/null
 
 # ko rather than a Dockerfile: no base image to keep patched, no build stage to
 # get wrong, and no build context to .dockerignore. The tag it prints is a hash
