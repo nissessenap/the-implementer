@@ -296,6 +296,73 @@ func TestRunPlan(t *testing.T) {
 				t.Error("a phase ran despite the branch already existing")
 			}
 		},
+	}, {
+		// The failed-implement path, which no other case reaches: the commits are
+		// pushed anyway, because they cost the same money a completed phase's do
+		// and `status` is what tells the PR builder not to open a pull request —
+		// but the *process* exits 1, because the Job condition is the
+		// orchestrator's other result channel and the two must not disagree.
+		name: "a failed implement phase pushes its work and still fails the Job",
+		stubs: []stub{
+			{rc: 1, sideFX: commit("half.go"),
+				result: map[string]any{"type": "result", "subtype": "error_during_execution",
+					"is_error": true, "total_cost_usd": 1.5, "result": "API Error: 529 overloaded"}},
+			{result: result(0.1, map[string]any{
+				"status": "completed", "summary": "nothing to review", "findings": 0, "fixed": 0})},
+			{result: result(0.1, map[string]any{
+				"status": "completed", "summary": "nothing to cut", "findings": 0, "fixed": 0})},
+		},
+		exit: 1,
+		check: func(t *testing.T, r Result, h harness) {
+			eq(t, "status", r.Status, "failed")
+			eq(t, "phases", phaseLine(r), "implement=error review=completed ponytail=completed")
+			eq(t, "commits", r.Commits, 1)
+			eq(t, "the work reached the remote", h.remoteHas(t, "half.go"), true)
+			// No structured_output on an error path, so there is no title to carry.
+			eq(t, "pr_title", r.PRTitle, "")
+			eq(t, "cost", fmt.Sprintf("%.1f", r.CostUSD), "1.7")
+		},
+	}, {
+		// A phase whose process died before emitting a result at all: its own exit
+		// status is the only evidence, and whatever it spent is unknowable rather
+		// than zero-with-a-`($)`-log-line.
+		name: "an implement phase that emitted no result is a failed run",
+		stubs: []stub{
+			{rc: 137},
+			{result: result(0.1, map[string]any{
+				"status": "completed", "summary": "nothing to review", "findings": 0, "fixed": 0})},
+			{result: result(0.1, map[string]any{
+				"status": "completed", "summary": "nothing to cut", "findings": 0, "fixed": 0})},
+		},
+		exit: 1,
+		check: func(t *testing.T, r Result, h harness) {
+			eq(t, "status", r.Status, "failed")
+			eq(t, "phases", phaseLine(r), "implement=no_result review=completed ponytail=completed")
+			contains(t, "the dead phase carries its rc", r.Phases[0].Summary, "rc=137")
+			eq(t, "cost", fmt.Sprintf("%.1f", r.CostUSD), "0.2")
+			eq(t, "nothing pushed", h.remoteHasBranch(t), false)
+		},
+	}, {
+		// The preflight, which nothing else exercises — and it is the one place
+		// where the diagnostic has to survive report() failing, because a missing
+		// tool may be the very tool report() is built out of.
+		name: "a preflight violation writes the blob and spends nothing",
+		before: func(t *testing.T, h harness) {
+			if err := os.Remove(filepath.Join(h.opt, "ponytail/skills/ponytail-review/SKILL.md")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		exit: 1,
+		check: func(t *testing.T, r Result, h harness) {
+			eq(t, "status", r.Status, "failed")
+			contains(t, "message names the file", r.Message, "ponytail-review/SKILL.md is missing")
+			contains(t, "message names the phase", r.Message, "preflight")
+			eq(t, "cost", r.CostUSD, 0.0)
+			eq(t, "phases", phaseLine(r), "")
+			if _, err := os.Stat(filepath.Join(h.stubs, "n")); err == nil {
+				t.Error("a phase ran despite the preflight failing")
+			}
+		},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := setup(t, tc.stubs)
@@ -315,9 +382,12 @@ type harness struct {
 
 func setup(t *testing.T, stubs []stub) harness {
 	t.Helper()
+	// Fatal rather than Skip: `go test ./...` without -v prints `ok` for a skipped
+	// package, so a runner image that loses one of these makes the whole run plan
+	// silently untested. All three are on every CI image and every dev box.
 	for _, tool := range []string{"git", "jq", "sh"} {
 		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s is required to run the run plan", tool)
+			t.Fatalf("%s is required to run the run plan", tool)
 		}
 	}
 	dir := t.TempDir()
