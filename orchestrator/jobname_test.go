@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/nissessenap/the-implementer/proxy"
@@ -11,38 +12,65 @@ func name(owner, repo, issue string) string {
 	return JobName(proxy.Run{Owner: owner, Repo: repo, Issue: issue, UID: "ignored"})
 }
 
-// The ordinary case, and the one an operator reads in `kubectl get job`: no hash,
-// no prefix, just the identity.
+// The ordinary case, and the one an operator reads in `kubectl get job`: the
+// identity, then the hash. No prefix, and the slug is not truncated.
 func TestJobNameIsTheSlug(t *testing.T) {
-	if got, want := name("nissessenap", "the-implementer", "15"), "nissessenap-the-implementer-15"; got != want {
-		t.Errorf("JobName = %q, want %q", got, want)
+	got := name("nissessenap", "the-implementer", "15")
+	if !strings.HasPrefix(got, "nissessenap-the-implementer-15-") {
+		t.Errorf("JobName = %q, want the identity in front of the hash", got)
 	}
-	// Case-folding needs no hash: GitHub forbids owners and repos that differ
-	// only in case, so the fold is not lossy.
-	if got, want := name("NisseSsenap", "The-Implementer", "15"), "nissessenap-the-implementer-15"; got != want {
-		t.Errorf("JobName = %q, want %q", got, want)
+	if !regexp.MustCompile(`^nissessenap-the-implementer-15-[0-9a-f]{8}$`).MatchString(got) {
+		t.Errorf("JobName = %q is not slug + 8 hex", got)
+	}
+	// Case-folding needs no separate name: GitHub forbids owners and repos that
+	// differ only in case, so the fold is not lossy and both spellings are one run.
+	if fold := name("NisseSsenap", "The-Implementer", "15"); fold != got {
+		t.Errorf("JobName = %q for the case-folded spelling, want %q", fold, got)
 	}
 }
 
-// THE load-bearing clause. Narrow the condition to length alone and both of these
-// become "acme-my-repo-5": the second run is swallowed as redelivery and "no
-// database" turns into "silently drops runs". Underscores in repository names are
-// real — google-deepmind/open_spiel keeps its underscore and open-spiel 404s.
+// The reason every name is hashed. Two pairs, and neither can be separated by a
+// length check: normalisation is lossy (`my_repo` and `my-repo` both slugify to
+// `my-repo` — google-deepmind/open_spiel keeps its underscore and open-spiel
+// 404s), and the '-' the components are joined with is legal *inside* an owner and
+// a repo, so the join re-splits. Collide either pair and the second run is
+// swallowed as redelivery: "no database" becomes "silently drops runs".
 func TestJobNameSurvivesLossyNormalisation(t *testing.T) {
-	under, dash := name("acme", "my_repo", "5"), name("acme", "my-repo", "5")
-	if under == dash {
-		t.Fatalf("acme/my_repo#5 and acme/my-repo#5 both got %q", under)
-	}
-	if dash != "acme-my-repo-5" {
-		t.Errorf("the clean name should not be hashed: %q", dash)
-	}
-	if len(under) > 63 {
-		t.Errorf("hashed name %q is %d chars", under, len(under))
+	for _, p := range [][2]proxy.Run{
+		{{Owner: "acme", Repo: "my_repo", Issue: "5"}, {Owner: "acme", Repo: "my-repo", Issue: "5"}},
+		{{Owner: "acme-my", Repo: "repo", Issue: "5"}, {Owner: "acme", Repo: "my-repo", Issue: "5"}},
+		{{Owner: "kubernetes", Repo: "sigs-cluster-api", Issue: "70"}, {Owner: "kubernetes-sigs", Repo: "cluster-api", Issue: "70"}},
+	} {
+		a, b := JobName(p[0]), JobName(p[1])
+		if a == b {
+			t.Errorf("%s and %s both got %q", p[0], p[1], a)
+		}
+		if len(a) > 63 || len(b) > 63 {
+			t.Errorf("%q (%d) / %q (%d) past the cap", a, len(a), b, len(b))
+		}
 	}
 	// The hash is over the raw identity, never the slug — hashing the lossy
 	// artifact would make both variants hash identically and defeat the point.
-	if hashOf(under) == hashOf(name("acme", "my.repo", "5")) {
+	if hashOf(name("acme", "my_repo", "5")) == hashOf(name("acme", "my.repo", "5")) {
 		t.Error("my_repo and my.repo hash the same: the hash is over the slug")
+	}
+}
+
+// An identity that slugifies to nothing leaves the bare hash, not a leading '-',
+// which the apiserver refuses. Unreachable through ParseIssue — the issue must be
+// numeric, so the slug always ends in a digit — but JobName takes a bare Run and
+// the webhook front-end will build one from a payload.
+func TestJobNameIsAlwaysALabel(t *testing.T) {
+	label := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	for _, r := range []proxy.Run{
+		{Owner: "_", Repo: "_", Issue: "_"},
+		{},
+		{Owner: "..", Repo: "..", Issue: ".."},
+		{Owner: "acme", Repo: "widgets", Issue: "5"},
+	} {
+		if got := JobName(r); !label.MatchString(got) {
+			t.Errorf("JobName(%s) = %q is not a DNS-1123 label", r, got)
+		}
 	}
 }
 

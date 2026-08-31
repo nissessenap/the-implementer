@@ -7,13 +7,16 @@ import (
 	"encoding/hex"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/yaml"
 
 	"github.com/nissessenap/the-implementer/proxy"
 )
@@ -184,7 +187,32 @@ func TestSandboxProxyEnv(t *testing.T) {
 // secret in the proxy URL, is a regression.
 func TestSandboxHoldsNoCredential(t *testing.T) {
 	j, _ := build(t)
-	for _, v := range j.Spec.Template.Spec.Containers[0].Env {
+	// Every container, and every one of the three ways an environment arrives.
+	// Containers[0].Env alone is the shape the builder writes today, which is the
+	// half that cannot regress — an `envFrom: secretRef:` the chart renders, or a
+	// future init container, is exactly what would slip past.
+	pod := &j.Spec.Template.Spec
+	for _, cts := range [][]corev1.Container{pod.InitContainers, pod.Containers} {
+		for _, ct := range cts {
+			for _, ef := range ct.EnvFrom {
+				if ef.SecretRef != nil {
+					t.Errorf("%s reads Secret %s wholesale", ct.Name, ef.SecretRef.Name)
+				}
+			}
+			assertNoCredential(t, ct.Name, ct.Env)
+		}
+	}
+	// And no Secret volume, which is the other way a credential arrives.
+	for _, vol := range pod.Volumes {
+		if vol.Secret != nil {
+			t.Errorf("the sandbox mounts Secret %s", vol.Secret.SecretName)
+		}
+	}
+}
+
+func assertNoCredential(t *testing.T, container string, vars []corev1.EnvVar) {
+	t.Helper()
+	for _, v := range vars {
 		switch v.Name {
 		case "GH_TOKEN", "https_proxy", "HTTPS_PROXY":
 			continue // the sentinel and the run secret, both worthless outside this cluster
@@ -192,17 +220,11 @@ func TestSandboxHoldsNoCredential(t *testing.T) {
 		up := strings.ToUpper(v.Name)
 		for _, bad := range []string{"API_KEY", "OAUTH", "TOKEN", "GOOGLE_APPLICATION", "SECRET", "CREDENTIAL", "PASSWORD", "AWS_ACCESS"} {
 			if strings.Contains(up, bad) {
-				t.Errorf("the sandbox holds %s", v.Name)
+				t.Errorf("%s holds %s", container, v.Name)
 			}
 		}
 		if v.ValueFrom != nil && v.ValueFrom.SecretKeyRef != nil {
-			t.Errorf("%s reads a Secret", v.Name)
-		}
-	}
-	// And no Secret volume, which is the other way a credential arrives.
-	for _, vol := range j.Spec.Template.Spec.Volumes {
-		if vol.Secret != nil {
-			t.Errorf("the sandbox mounts Secret %s", vol.Secret.SecretName)
+			t.Errorf("%s: %s reads a Secret", container, v.Name)
 		}
 	}
 }
@@ -290,6 +312,32 @@ func TestCreateSwallowsAlreadyExists(t *testing.T) {
 	}
 }
 
+// A swallowed AlreadyExists is a redelivery only while the Job is running.
+// ttlSecondsAfterFinished keeps a terminal Job for a day, so for that day a re-run
+// of a *failed* issue reports `exists` and does nothing — Phase is what makes the
+// two distinguishable on the line an operator reads.
+func TestPhaseNamesATerminalJob(t *testing.T) {
+	j, _ := build(t)
+	c := fake.NewSimpleClientset()
+	if _, err := Create(context.Background(), c, j, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := Phase(context.Background(), c, j.Namespace, j.Name); got != "active" {
+		t.Errorf("a fresh Job is %q, want active", got)
+	}
+	live, _ := c.BatchV1().Jobs(j.Namespace).Get(context.Background(), j.Name, metav1.GetOptions{})
+	live.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	if _, err := c.BatchV1().Jobs(j.Namespace).UpdateStatus(context.Background(), live, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := Phase(context.Background(), c, j.Namespace, j.Name); got != "Failed" {
+		t.Errorf("a failed Job is %q, want Failed", got)
+	}
+	if got := Phase(context.Background(), c, j.Namespace, "no-such-job"); got != "unreadable" {
+		t.Errorf("a missing Job is %q, want unreadable", got)
+	}
+}
+
 func TestParseIssue(t *testing.T) {
 	r, err := ParseIssue("nissessenap/the-implementer#70")
 	if err != nil {
@@ -298,9 +346,70 @@ func TestParseIssue(t *testing.T) {
 	if r != (proxy.Run{Owner: "nissessenap", Repo: "the-implementer", Issue: "70"}) {
 		t.Errorf("got %+v", r)
 	}
-	for _, bad := range []string{"", "owner/repo", "owner#5", "/repo#5", "owner/#5", "owner/repo#", "owner/repo#x"} {
+	// The last four are proxy.Cred's contract and not cosmetics: the claim is
+	// comma-joined, so a comma makes the proxy count five fields and answer 407 for
+	// the whole of activeDeadlineSeconds. GitHub allows only [A-Za-z0-9._-], so
+	// refusing here is a named error instead of a run that burns its deadline.
+	for _, bad := range []string{"", "owner/repo", "owner#5", "/repo#5", "owner/#5", "owner/repo#", "owner/repo#x",
+		"ow,ner/repo#5", "owner/re,po#5", "owner/re po#5", "owner/a/b#5"} {
 		if _, err := ParseIssue(bad); err == nil {
 			t.Errorf("%q parsed", bad)
 		}
+	}
+}
+
+// The chart's own rendered template through the builder, which nothing else does:
+// miniTemplate is deliberately not a copy of the chart's, so every other test here
+// is blind to what the chart actually renders. Two things only this can catch — an
+// env name the chart introduces that the builder also writes (the append leaves a
+// duplicate for the kubelet, defined nowhere either of us can cite), and the
+// sandbox script surviving `nindent 22` inside `args: - |` inside `job.yaml: |`,
+// which is three nested block scalars and was otherwise proven only by a live
+// stage-80 run.
+func TestTheChartsTemplateSurvivesTheBuilder(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("no helm")
+	}
+	script := "#!/bin/sh\nset -eu\n# a line with 'quotes' and a $dollar\necho hello\n"
+	dir := t.TempDir()
+	sp := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(sp, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// vertex.enabled, because that branch renders the most env — the render that
+	// works is the one the e2e already covers.
+	out, err := exec.Command("helm", "template", "../charts/orchestrator",
+		"-s", "templates/job-template.yaml",
+		"--set-string", "sandbox.image=alpine",
+		"--set-file", "sandbox.script="+sp,
+		"--set", "vertex.enabled=true",
+		"--set-string", "vertex.projectId=p",
+	).Output()
+	if err != nil {
+		t.Fatalf("helm template: %v", err)
+	}
+	var cm struct{ Data map[string]string }
+	if err := yaml.Unmarshal(out, &cm); err != nil {
+		t.Fatal(err)
+	}
+	tp := filepath.Join(dir, "job.yaml")
+	if err := os.WriteFile(tp, []byte(cm.Data["job.yaml"]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := LoadTemplate(tp)
+	if err != nil {
+		t.Fatalf("the chart renders a template the builder refuses: %v", err)
+	}
+	c := Config{Namespace: "implementer", ProxyHost: "proxy", Key: []byte("k"), Template: tmpl}
+	j := c.Build(proxy.Run{Owner: "acme", Repo: "widgets", Issue: "5", UID: "u"})
+
+	seen := map[string]int{}
+	for _, v := range j.Spec.Template.Spec.Containers[0].Env {
+		if seen[v.Name]++; seen[v.Name] > 1 {
+			t.Errorf("%s appears twice: the chart and the builder both write it", v.Name)
+		}
+	}
+	if got := strings.Join(j.Spec.Template.Spec.Containers[0].Args, ""); !strings.Contains(got, script) {
+		t.Errorf("the script did not survive the nested block scalars:\n%s", got)
 	}
 }

@@ -112,9 +112,7 @@ swallowed. There is no dedupe table because there is nothing to keep a table in.
 slug = lower(owner-repo-issue), every char outside [a-z0-9] -> '-', trim '-'
 hash = sha256("owner/repo#issue", case-folded)[:8]
 
-name = slug                          if len(slug) <= 63
-                                     AND owner+repo are [A-Za-z0-9-] only
-     = trim(slug[:54]) + "-" + hash  otherwise
+name = trim(slug[:54]) + "-" + hash
 ```
 
 Two things about this are not obvious and were measured rather than assumed
@@ -127,15 +125,28 @@ Two things about this are not obvious and were measured rather than assumed
   `implementer-kubernetes-sigs-cluster-api-provider-openstack-12345` is 64
   characters and is refused — a real repository in the Kubernetes org, not a
   pathological name.
-- **The hash condition is wider than length, and that is the load-bearing
-  clause.** Normalisation is lossy: `acme/my_repo#5` and `acme/my-repo#5` both
-  normalise to `acme-my-repo-5`. Both are under 63, so a length-only condition
-  gives them the *same* Job name and silently swallows the second run as
-  redelivery. That turns "no database" into "silently drops runs". It is
-  reachable — `google-deepmind/open_spiel` keeps its underscore and
+- **The hash is unconditional, and the condition it replaces could not be
+  written correctly.** An earlier version hashed only when the derivation lost
+  something — `len(slug) <= 63 AND owner+repo are [A-Za-z0-9-] only` — and that
+  misses the delimiter. The components are joined with `-`, which is legal
+  *inside* an owner and inside a repo, so every re-split of the join at a
+  different `-` is a distinct identity with the same name: `acme-my/repo#5` and
+  `acme/my-repo#5`, or `kubernetes/sigs-cluster-api#70` and
+  `kubernetes-sigs/cluster-api#70` — all lossless, all under the cap, all
+  colliding. The second run is then swallowed as redelivery and silently
+  dropped, which turns "no database" into "silently drops runs".
+
+  Normalisation being lossy is the same failure by another route:
+  `acme/my_repo#5` and `acme/my-repo#5` both slugify to `acme-my-repo-5`, and it
+  is reachable — `google-deepmind/open_spiel` keeps its underscore and
   `google-deepmind/open-spiel` 404s, so the widespread claim that GitHub
-  normalises `_` to `-` is false. Case-folding needs no hash, because GitHub
-  does forbid owners and repos differing only in case.
+  normalises `_` to `-` is false.
+
+  Nine characters of suffix ends the whole class, keeps one code path instead of
+  two, and the name still reads:
+  `nissessenap-the-implementer-70-1a2b3c4d`. Case-folding needs no separate
+  treatment either way, because GitHub does forbid owners and repos differing
+  only in case.
 
 The hash is over the **raw identity**, never the slug — hashing the lossy
 artifact would make both variants hash identically and defeat the point.

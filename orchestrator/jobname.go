@@ -35,33 +35,43 @@ const hashLen = 8
 // The run's UID is deliberately not part of the name — it is what makes the
 // *credential* per-run, where the name is per-issue on purpose.
 func JobName(r proxy.Run) string {
-	raw := r.Owner + "-" + r.Repo + "-" + r.Issue
-	slug := slugify(raw)
-
-	// The condition is wider than length, and that is the load-bearing clause.
-	// Normalisation is lossy: `acme/my_repo#5` and `acme/my-repo#5` both slugify
-	// to `acme-my-repo-5`, both are under the cap, and a length-only condition
-	// would give them the same name — silently swallowing the second run as
-	// redelivery, which turns "no database" into "silently drops runs".
+	// Every name carries the hash, and the hash is the whole of uniqueness: the
+	// slug in front of it is there to be *read*, not to distinguish runs.
 	//
-	// "Slugifying lost nothing" is exactly "the slug is the identity, lowercased",
-	// so the comparison is the predicate — no second spelling of the alphabet.
-	if len(slug) <= maxName && slug == strings.ToLower(raw) {
-		return slug
-	}
+	// The first version hashed conditionally — only when normalisation lost
+	// something — and that condition cannot be written correctly. The components
+	// are joined with '-', which is legal *inside* an owner and inside a repo, so
+	// every re-split of the join at a different '-' is a distinct identity with the
+	// same name: `acme-my/repo#5` and `acme/my-repo#5`, or
+	// `kubernetes/sigs-cluster-api#70` and `kubernetes-sigs/cluster-api#70`, all of
+	// them lossless and all of them under the cap. The second run then collides at
+	// the apiserver, is swallowed as redelivery, and is silently dropped — which
+	// turns "no database" into "silently drops runs".
+	//
+	// Nine characters of suffix buys that whole class away, and the name still
+	// reads: nissessenap-the-implementer-70-1a2b3c4d.
+	slug := slugify(r.Owner + "-" + r.Repo + "-" + r.Issue)
 
 	// Over the *raw* identity, case-folded, never over the slug: hashing the lossy
-	// artifact would make both variants hash identically and defeat the point.
-	// Case-folded because GitHub forbids owners and repos differing only in case,
-	// so that fold is the one normalisation which loses nothing.
+	// artifact would make `my_repo` and `my-repo` hash identically and defeat the
+	// point. Case-folded because GitHub forbids owners and repos differing only in
+	// case, so that fold is the one normalisation which loses nothing.
 	sum := sha256.Sum256([]byte(strings.ToLower(r.String())))
+	hash := hex.EncodeToString(sum[:])[:hashLen]
+
 	if len(slug) > maxName-hashLen-1 {
 		slug = slug[:maxName-hashLen-1]
 	}
 	// Trimmed after truncating, or a cut landing on a '-' puts two dashes in front
-	// of the hash — legal in a label, and it reads as a bug. Only the trailing one:
-	// interior runs come from the identity itself and are left alone.
-	return strings.Trim(slug, "-") + "-" + hex.EncodeToString(sum[:])[:hashLen]
+	// of the hash — legal in a label, and it reads as a bug. An identity that
+	// slugifies to nothing at all gets the bare hash rather than a leading '-',
+	// which is not a DNS-1123 label at all: unreachable through ParseIssue, which
+	// requires a numeric issue, but JobName takes a bare Run and the webhook
+	// front-end will build one from a payload instead.
+	if slug = strings.Trim(slug, "-"); slug == "" {
+		return hash
+	}
+	return slug + "-" + hash
 }
 
 // slugify is lower(s) with every character outside [a-z0-9] replaced by '-' and

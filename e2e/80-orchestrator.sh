@@ -50,8 +50,18 @@ RUN_REPO=${E2E_GITHUB_REPO:-$CLONE_REPO}
 # one line, and quoting a shell script through its replacement syntax is how a
 # probe stops being readable.
 sed "s|__CLONE_REPO__|$CLONE_REPO|g" "$E2E_DIR/orchestrator-probe.sh" > "$PROBE"
+#
+# A here-string and not a pipe: `grep -q` exits on the first match, kubectl then
+# dies of SIGPIPE, and `set -o pipefail` promotes that 141 to the pipeline's status
+# — so a *matching* probe takes the else branch and the push half reads as a
+# legitimate skip. Today's Deployment fits the pipe buffer and it does not fire,
+# which is the worst version of a bug like this.
 if [[ -n ${E2E_GITHUB_REPO:-} ]] &&
-  kubectl -n "$NS" get "deploy/$RELEASE" -o yaml 2>/dev/null | grep -qE 'GITHUB_TOKEN_FILE|GITHUB_APP_ID'; then
+  grep -qE 'GITHUB_TOKEN_FILE|GITHUB_APP_ID' <<<"$(kubectl -n "$NS" get "deploy/$RELEASE" -o yaml 2>/dev/null)"; then
+  # Named, because the bare `cat:` this replaces aborted the stage mid-script and
+  # said nothing about which half was missing.
+  [[ -f $E2E_DIR/orchestrator-push-probe.sh ]] ||
+    { echo "!!! FAIL: e2e/orchestrator-push-probe.sh is missing — the push half cannot run" >&2; exit 1; }
   cat "$E2E_DIR/orchestrator-push-probe.sh" >> "$PROBE"
 else
   echo 'echo "PROBE git-push-dry-run skipped (no credentialed proxy and E2E_GITHUB_REPO — run stage 50 or 60)"' >> "$PROBE"
@@ -116,15 +126,19 @@ kubectl -n "$NS" get "job/$LONG" >/dev/null \
 kubectl -n "$NS" delete "job/$LONG" --cascade=foreground --wait >/dev/null
 echo "PROBE long-name        $LONG (${#LONG} chars, created by the apiserver)"
 
-stage "the clause that is wider than length"
-# Normalisation is lossy: both of these slugify to acme-my-repo-5, both are under
-# the cap, and a length-only condition would give them the same Job name — the
-# second run swallowed as redelivery, which turns "no database" into "silently
-# drops runs". google-deepmind/open_spiel keeps its underscore and open-spiel 404s.
+stage "the reason every name is hashed"
+# Two pairs neither of which a length check separates. Normalisation is lossy —
+# my_repo and my-repo both slugify to my-repo, and google-deepmind/open_spiel keeps
+# its underscore while open-spiel 404s — and the '-' the components are joined with
+# is legal inside an owner and inside a repo, so the join re-splits. Collide either
+# pair and the second run is swallowed as redelivery: "no database" becomes
+# "silently drops runs".
 UNDER=$(orch run -dry-run "acme/my_repo#5" | job_of)
 DASH=$(orch run -dry-run "acme/my-repo#5" | job_of)
+SPLIT=$(orch run -dry-run "acme-my/repo#5" | job_of)
 [[ $UNDER != "$DASH" ]] || { echo "!!! FAIL: acme/my_repo#5 and acme/my-repo#5 are both '$UNDER'" >&2; exit 1; }
-echo "PROBE normalisation    $DASH vs $UNDER"
+[[ $SPLIT != "$DASH" ]] || { echo "!!! FAIL: acme-my/repo#5 and acme/my-repo#5 are both '$SPLIT'" >&2; exit 1; }
+echo "PROBE normalisation    $DASH vs $UNDER vs $SPLIT"
 
 stage "create the run for $RUN_REPO#$ISSUE"
 # A previous run of this stage owns the only Job carrying this label, and the count
@@ -135,8 +149,14 @@ JOB=$(orch run "$RUN_REPO#$ISSUE" | tee /dev/stderr | job_of)
 UID_BEFORE=$(kubectl -n "$NS" get "job/$JOB" -o jsonpath='{.metadata.annotations.implementer\.dev/run-uid}')
 
 stage "run it again — redelivery is a no-op, not a second Job and not an error"
-VERB=$(orch run "$RUN_REPO#$ISSUE" | tee /dev/stderr | awk '{print $1}')
+AGAIN=$(orch run "$RUN_REPO#$ISSUE" | tee /dev/stderr)
+VERB=$(awk '{print $1}' <<<"$AGAIN")
 [[ $VERB == exists ]] || { echo "!!! FAIL: the second run reported '$VERB'" >&2; exit 1; }
+# And it says *which* exists. ttlSecondsAfterFinished keeps a terminal Job for a
+# day, so `exists` alone covers both a redelivery and a re-run of a finished run
+# that will now do nothing until the TTL expires. The phase is appended last, after
+# the reference, so the two fields every other assertion here reads stay put.
+[[ $AGAIN == *"(active)"* ]] || { echo "!!! FAIL: the redelivery does not name the phase: '$AGAIN'" >&2; exit 1; }
 COUNT=$(kubectl -n "$NS" get job -l app=implementer -o name | wc -l)
 [[ $COUNT -eq 1 ]] || { echo "!!! FAIL: $COUNT Jobs after two runs of one issue" >&2; exit 1; }
 # The name is the whole of the dedupe, and AlreadyExists is swallowed rather than

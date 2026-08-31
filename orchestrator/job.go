@@ -130,6 +130,12 @@ func (c Config) Build(r proxy.Run) *batchv1.Job {
 	// the builder owns, so there is nothing to resolve — the day one does, the
 	// kubelet's behaviour on a duplicate is defined nowhere either of us can cite
 	// and this wants a drop-what-we-own pass before the append.
+	//
+	// Containers only, deliberately: there are no init containers, and wiring the
+	// environment into a list that is always empty reads as support for something
+	// that has never been tried. The day the trust bundle moves out of the probe
+	// into one, it needs this loop too — without it there is no SSL_CERT_FILE and
+	// no https_proxy, and it fails looking like a certificate problem.
 	env := c.env(r)
 	for i := range j.Spec.Template.Spec.Containers {
 		ct := &j.Spec.Template.Spec.Containers[i]
@@ -219,6 +225,29 @@ func Create(ctx context.Context, c kubernetes.Interface, j *batchv1.Job, dryRun 
 	return err == nil, err
 }
 
+// Phase reads the condition off a Job whose creation was swallowed, and exists
+// because `exists` alone is not the whole answer. A collided name is a redelivery
+// only while the Job is *running*: `ttlSecondsAfterFinished` keeps a finished one
+// for a day (ADR 0004), so for that day a re-run of a *failed* issue reports
+// `exists`, exits 0, and does nothing — indistinguishable from the redelivery it
+// is not. `get` is in the Role for exactly this reading.
+//
+// Best-effort by design: this decorates a line an operator reads, so an unreadable
+// Job is a word rather than a failure.
+func Phase(ctx context.Context, c kubernetes.Interface, ns, name string) string {
+	j, err := c.BatchV1().Jobs(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "unreadable"
+	}
+	for _, cond := range j.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue &&
+			(cond.Type == batchv1.JobComplete || cond.Type == batchv1.JobFailed) {
+			return string(cond.Type)
+		}
+	}
+	return "active"
+}
+
 func merge(into, from map[string]string) map[string]string {
 	if into == nil {
 		into = map[string]string{}
@@ -241,6 +270,19 @@ func ParseIssue(s string) (proxy.Run, error) {
 	}
 	if strings.IndexFunc(issue, func(c rune) bool { return c < '0' || c > '9' }) >= 0 {
 		return proxy.Run{}, fmt.Errorf("issue %q is not a number", issue)
+	}
+	// The alphabet is proxy.Cred's contract, not cosmetics: the claim it signs is
+	// comma-joined, so a comma in an owner or a repo makes the proxy see five
+	// fields and answer 407 for the rest of activeDeadlineSeconds. GitHub allows
+	// only these characters, so refusing here turns a run that burns its deadline
+	// into a named error on this line.
+	for _, f := range []string{owner, repo} {
+		if i := strings.IndexFunc(f, func(c rune) bool {
+			return !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
+				c == '.' || c == '_' || c == '-')
+		}); i >= 0 {
+			return proxy.Run{}, fmt.Errorf("%q is not a GitHub name: %q is not [A-Za-z0-9._-]", f, f[i:i+1])
+		}
 	}
 	return proxy.Run{Owner: owner, Repo: repo, Issue: issue}, nil
 }

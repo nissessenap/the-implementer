@@ -78,7 +78,8 @@ func run(args []string) {
 	}
 	job := cfg.Build(r)
 
-	created, err := orchestrator.Create(context.Background(), client(), job, *dry)
+	ctx, kube := context.Background(), client()
+	created, err := orchestrator.Create(ctx, kube, job, *dry)
 	if err != nil {
 		log.Fatalf("creating job %s: %v", job.Name, err)
 	}
@@ -91,7 +92,18 @@ func run(args []string) {
 	if *dry {
 		verb += "-dry-run"
 	}
-	fmt.Printf("%s %s/%s %s\n", verb, cfg.Namespace, job.Name, r)
+	// The existing Job's phase, appended *last* so $1 and $2 stay what the e2e
+	// reads. Without it `exists` covers two different situations: a redelivery,
+	// and a re-run of a run that already finished — ttlSecondsAfterFinished keeps
+	// a terminal Job for a day, and for that day this would exit 0 having done
+	// nothing, with no way to tell. Whether a re-run should replace a terminal Job
+	// is a policy question above this line; being able to see which one happened
+	// is not.
+	state := ""
+	if !created {
+		state = " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, job.Name) + ")"
+	}
+	fmt.Printf("%s %s/%s %s%s\n", verb, cfg.Namespace, job.Name, r, state)
 }
 
 // cred prints the userinfo the sandbox's https_proxy URL carries. Not for
