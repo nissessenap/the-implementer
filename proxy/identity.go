@@ -56,10 +56,13 @@ func Cred(key []byte, r Run) (user, pass string) {
 	return user, hex.EncodeToString(m.Sum(nil))
 }
 
-// complete is the one definition of "this is a run identity", used by both ends
-// of the comparison. Empty fields are refused rather than compared: "acme,,5,uid"
+// Complete is the one definition of "this is a run identity", used by every end of
+// the comparison. Empty fields are refused rather than compared: "acme,,5,uid"
 // must not match a Pod carrying no repo annotation.
-func (r Run) complete() bool {
+//
+// Exported for the orchestrator's informer, which asks the same question of the
+// annotations it reads off a Job — the same direction the rest of this seam runs in.
+func (r Run) Complete() bool {
 	return r.Owner != "" && r.Repo != "" && r.Issue != "" && r.UID != ""
 }
 
@@ -70,5 +73,5 @@ func parseRun(user string) (Run, bool) {
 		return Run{}, false
 	}
 	r := Run{Owner: f[0], Repo: f[1], Issue: f[2], UID: f[3]}
-	return r, r.complete()
+	return r, r.Complete()
 }

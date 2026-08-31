@@ -310,7 +310,10 @@ workaround][ghtoken]; our push does not originate in Actions at all.
   GC'd the transcript is gone — accepted, because a run we care about is a run
   whose PR we are reading, and that happens in minutes.
 - **What the human sees**: one issue comment posted by the orchestrator when the
-  informer fires, built from the termination-log blob.
+  informer fires, built from the termination-log blob — or, when the pod was killed
+  before writing one, from the Kubernetes-level reason, because that is the only
+  information a silent death leaves. Either way it names the resolved image digest,
+  and it carries the run marker that makes it the exactly-once record.
 - **No live view.** [The scion research][scion] found scion built a full PTY
   bridge for this and its shareable-URL mechanism is an unimplemented stub. That
   is the evidence: the interactive path is expensive and easy to get wrong.

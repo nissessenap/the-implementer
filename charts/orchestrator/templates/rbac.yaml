@@ -1,12 +1,19 @@
-# The orchestrator's whole cluster access for this ticket: create a Job, and read
-# the Jobs it created, in its own namespace. Nothing cluster-scoped and no
-# Secrets — ADR 0005 moved the sandbox's credential to the proxy, which deleted
-# the per-run Secret, its ownerReference and its orphan sweep from this component.
+# The orchestrator's whole cluster access: create a Job, and read the Jobs and the
+# Pods in its own namespace. Nothing cluster-scoped and no Secrets — ADR 0005 moved
+# the sandbox's credential to the proxy, which deleted the per-run Secret, its
+# ownerReference and its orphan sweep from this component.
 #
-# `get` and `list` are not decoration: `get` is what a swallowed AlreadyExists is
-# worth reading after, and `list` is ADR 0004's restart-is-a-relist. `watch` is
-# not here — the informer that needs it watches **Pods**, and that is the ticket
-# after this one.
+# On Jobs, none of the four verbs is decoration: `get` is what a swallowed
+# AlreadyExists is worth reading after, `list` is ADR 0004's restart-is-a-relist,
+# and `watch` is what notices the one ending that leaves no pod behind — when
+# `activeDeadlineSeconds` expires the Job controller deletes the active pods, so the
+# Job's condition is the only record of it.
+#
+# On Pods it is read-only, and that is load-bearing rather than minimalism: both
+# result channels are pod-level (the blob is the container's terminated `message`,
+# the resolved digest is its `imageID`), and with no way to write to a Pod the
+# informer cannot mark a run as reported in Kubernetes. Which is why the
+# exactly-once record is the issue comment itself.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -19,7 +26,10 @@ metadata:
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["create", "get", "list"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

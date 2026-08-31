@@ -6,6 +6,7 @@
 // build one Job and create it — so the seam being exercised here is the real one.
 //
 //	orchestrator run [-dry-run] [-toolchain go] owner/repo#5
+//	orchestrator watch [-once]
 //	orchestrator cred owner repo issue run-uid
 package main
 
@@ -17,7 +18,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -32,11 +36,13 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
-	// ponytail: two subcommands and a hand-rolled dispatch. A flag library, or
-	// per-subcommand help, when there is a third.
+	// ponytail: a hand-rolled dispatch, still. A flag library or per-subcommand
+	// help when one of these grows a second page of flags.
 	switch os.Args[1] {
 	case "run":
 		run(os.Args[2:])
+	case "watch":
+		watch(os.Args[2:])
 	case "cred":
 		cred(os.Args[2:])
 	default:
@@ -46,6 +52,7 @@ func main() {
 
 func usage() {
 	log.Fatal("usage: orchestrator run [-dry-run] [-toolchain <t>] <owner>/<repo>#<n>\n" +
+		"       orchestrator watch [-once]\n" +
 		"       orchestrator cred <owner> <repo> <issue> <run-uid>")
 }
 
@@ -104,6 +111,68 @@ func run(args []string) {
 		state = " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, job.Name) + ")"
 	}
 	fmt.Printf("%s %s/%s %s%s\n", verb, cfg.Namespace, job.Name, r, state)
+}
+
+// watch is the informer half of ADR 0004: it watches the runs in this namespace and
+// gives every ending one issue comment. Why it exists at all is written down once,
+// on orchestrator.Reporter.
+//
+// It holds no App private key: the token comes from the credential proxy's own mint
+// path, signed by whichever external provider was linked in by build tag.
+func watch(args []string) {
+	fs := flag.NewFlagSet("watch", flag.ExitOnError)
+	// Restart-is-a-relist, on its own: reconcile what is in the namespace now and
+	// exit. Not an operator mode — it is how the e2e asserts the restart case
+	// without a Deployment, and there is no Deployment until the webhook lands.
+	once := fs.Bool("once", false, "reconcile the runs in the namespace once and exit, rather than watching")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		usage()
+	}
+
+	ctx := context.Background()
+	appID, err := strconv.ParseInt(env("GITHUB_APP_ID"), 10, 64)
+	if err != nil {
+		log.Fatalf("GITHUB_APP_ID=%s: %v", os.Getenv("GITHUB_APP_ID"), err)
+	}
+	// The API base URL is the seam, and it is handed to *both* clients: ghait's
+	// mint path and the orchestrator's own calls. Empty is api.github.com.
+	api := os.Getenv("GITHUB_API_URL")
+	// The same mint path the proxy uses, deliberately — one signer, one build-tag
+	// choice of provider, and no second implementation of "authenticate as the
+	// App". The credential it returns is per-run and scoped to the run's own
+	// repository, which is exactly the scope the comment needs.
+	cred, err := proxy.MintedGitHub(ctx, proxy.GitHubApp{
+		AppID: appID,
+		// Must have been linked in by build tag; naming one that was not is a boot
+		// failure, by name.
+		Provider: env("GITHUB_APP_PROVIDER"),
+		Key:      env("GITHUB_APP_KEY"),
+		BaseURL:  api,
+	})
+	if err != nil {
+		log.Fatalf("GitHub App: %v", err)
+	}
+
+	r := &orchestrator.Reporter{
+		Kube: client(),
+		NS:   env("POD_NAMESPACE"),
+		GH:   &orchestrator.GitHub{BaseURL: api, Token: cred.Token},
+	}
+	if *once {
+		if err := r.Reconcile(ctx); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	// SIGTERM is how a Deployment rolls, and the informer's whole lifetime is this
+	// context — so a rollout stops the watch rather than being killed mid-report.
+	// Nothing is lost either way: the next process relists.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := r.Watch(ctx); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // cred prints the userinfo the sandbox's https_proxy URL carries. Not for

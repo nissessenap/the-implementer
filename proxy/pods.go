@@ -106,7 +106,7 @@ func (p *Pods) Run(ctx context.Context, ip string) (Run, error) {
 	}
 	a := pod.Annotations
 	r := Run{Owner: a[AnnOwner], Repo: a[AnnRepo], Issue: a[AnnIssue], UID: a[AnnRunUID]}
-	if !r.complete() {
+	if !r.Complete() {
 		return Run{}, fmt.Errorf("pod %s carries no run identity", pod.Name)
 	}
 	return r, nil

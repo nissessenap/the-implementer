@@ -44,10 +44,10 @@ GitHub ──webhook──► front-end ──create Job──► apiserver
                                                   │
                                              Job runs
                                                   │
-                    informer ◄──watch Pods────────┘
-                        │
-                        ├─► POST pull request       (GitHub)
-                        └─► POST issue comment      (GitHub)
+          informer ◄──watch Pods + Jobs───────────┘
+              │
+              ├─► POST pull request       (GitHub)
+              └─► POST issue comment      (GitHub)
 ```
 
 ### The two halves
@@ -64,9 +64,28 @@ digest [ADR 0001][adr1] requires is `containerStatuses[].imageID`, and the
 transcript is `pods/log` on the Pod. A Job-level watch would see completion and
 then have to go and find the Pod anyway.
 
+**Amended 2026-08-31, when the informer was built: it watches Jobs as well.** The
+paragraph above stands unchanged — the Pod is still the whole of the result, and
+that is still why a Job watch cannot replace it. What it missed is one ending. When
+`activeDeadlineSeconds` expires, the Job controller marks the Job failed and
+**deletes the active pods**, so there is no terminal Pod, no termination message, no
+`pods/log`, and no further Pod event to wake anything. The Job's
+`status.conditions` entry (`reason: DeadlineExceeded`) is the only record that the
+run happened at all — and the deadline is precisely the ending a human has no other
+way to learn about, which is the reason this component exists.
+
+So both informers run and both funnel into one decision keyed by the Job: Pods
+answer *what the run did*, the Job answers *that it ended*. "Watching Jobs rather
+than Pods" stays rejected below, on its own terms; watching only Pods is what turned
+out to be wrong. The cost is one verb — `jobs: watch` — on a Role that already had
+`jobs: get,list`. Measured in `e2e/90-informer.sh`, which expires a real deadline
+and asserts the comment is still posted.
+
 On a terminal Pod the informer reads the blob, and — per the [push and PR
 decision][push] — opens a draft pull request if commits exist, or posts an issue
-comment if they do not.
+comment if they do not. **On a Pod that wrote no blob it reports the
+Kubernetes-level reason instead**, because that is the whole of what exists about a
+run killed by a signal, and the one outcome nothing inside the sandbox can report.
 
 ### State lives in Kubernetes objects and GitHub
 
@@ -107,6 +126,20 @@ identity off the Job instead would have cost `jobs: get` plus an ownerReference 
 Webhook redelivery, double-labelling and a mid-run restart all resolve to the
 same mechanism: the Job name is derived from the issue, and `AlreadyExists` is
 swallowed. There is no dedupe table because there is nothing to keep a table in.
+A swallowed create keeps the *existing* Job's `run-uid`, so a second label does not
+give the run a new identity either.
+
+**The report has the same problem one layer out, and the answer is the same shape:
+its record is the comment.** The informer puts
+`<!-- implementer-run: <run-uid> -->` first in every comment it posts and scans the
+thread for it before posting — so a restart between "the run finished" and "the
+comment exists" costs one comment, not two, and the orchestrator still holds
+nothing it cannot rebuild. It could not use a Kubernetes object for this even if it
+wanted to: its RBAC is read-only on Pods and Jobs. Only comments the App itself
+wrote count, because the marker is in the comment and therefore not a secret —
+otherwise anyone able to comment on the issue could silence a run's report by
+posting the marker first, which is the exact failure this component exists to
+prevent.
 
 ```
 slug = lower(owner-repo-issue), every char outside [a-z0-9] -> '-', trim '-'
@@ -207,7 +240,8 @@ component entirely. **The orchestrator creates exactly one object per run.**
 - **Watching Jobs rather than Pods.** Both result channels and the image digest
   are pod-level, so a Job watch has to resolve the Pod anyway. A Job's
   `status.conditions` carries no exit code, no termination message and no pod
-  name.
+  name. Still rejected as *the* watch — see the 2026-08-31 amendment above for why
+  it is nonetheless watched **as well**, which is a different claim.
 - **A dedupe table keyed by delivery id.** The Job name already collides
   correctly, at the apiserver, with no state of ours. Adding a table would
   reintroduce the database this ADR exists to avoid, to solve a problem

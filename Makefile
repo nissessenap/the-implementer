@@ -15,6 +15,12 @@ test:
 	# and drops the PEM one, so `go test`'s tag set never compiles it. Nothing
 	# else here would catch a break in that half until release.
 	go build -tags $(GO_TAGS) -o /dev/null ./cmd/proxy
+	# The orchestrator's informer authenticates as the App through the same mint
+	# path, so it has the same two builds — and `ghait.no_file` is what makes "the
+	# orchestrator holds no App private key" a property of the binary rather than a
+	# promise. The e2e signs with the file provider precisely because its build has
+	# one; production cannot.
+	go build -tags $(GO_TAGS) -o /dev/null ./cmd/orchestrator
 	# And the e2e's build is a third one. Here rather than only in the stage that
 	# uses it, so a break in the self-hosted signer costs a `make test` and not a
 	# cluster.
