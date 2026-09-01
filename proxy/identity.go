@@ -38,6 +38,17 @@ type Run struct {
 // mint scope reads: mint for this repository, never for the one the URL names.
 func (r Run) String() string { return r.Owner + "/" + r.Repo + "#" + r.Issue }
 
+// RunFromAnnotations reads run identity off the four annotations above. Here rather
+// than at each reader, because there are two — the proxy off the Pod, the
+// orchestrator's informer off the Job — and two spellings of the same four lookups
+// is exactly the drift the exported constants exist to prevent.
+//
+// It does not check Complete: what an incomplete claim means is the caller's, and
+// the two disagree. The proxy refuses it; the informer skips the object.
+func RunFromAnnotations(a map[string]string) Run {
+	return Run{Owner: a[AnnOwner], Repo: a[AnnRepo], Issue: a[AnnIssue], UID: a[AnnRunUID]}
+}
+
 // Cred derives the run's proxy credential from the one long-lived shared key both
 // components mount. The orchestrator injects it as userinfo in the sandbox's
 // https_proxy URL — every client derives Proxy-Authorization from that unaided —
@@ -56,10 +67,13 @@ func Cred(key []byte, r Run) (user, pass string) {
 	return user, hex.EncodeToString(m.Sum(nil))
 }
 
-// complete is the one definition of "this is a run identity", used by both ends
-// of the comparison. Empty fields are refused rather than compared: "acme,,5,uid"
+// Complete is the one definition of "this is a run identity", used by every end of
+// the comparison. Empty fields are refused rather than compared: "acme,,5,uid"
 // must not match a Pod carrying no repo annotation.
-func (r Run) complete() bool {
+//
+// Exported for the orchestrator's informer, which asks the same question of the
+// annotations it reads off a Job — the same direction the rest of this seam runs in.
+func (r Run) Complete() bool {
 	return r.Owner != "" && r.Repo != "" && r.Issue != "" && r.UID != ""
 }
 
@@ -70,5 +84,5 @@ func parseRun(user string) (Run, bool) {
 		return Run{}, false
 	}
 	r := Run{Owner: f[0], Repo: f[1], Issue: f[2], UID: f[3]}
-	return r, r.complete()
+	return r, r.Complete()
 }

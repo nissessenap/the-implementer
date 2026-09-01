@@ -26,6 +26,13 @@ type GitHubApp struct {
 	// Key is whatever that provider takes: a path to a PKCS#1 PEM for "file", a
 	// `projects/…/cryptoKeyVersions/1` resource name for "gcp".
 	Key string
+
+	// BaseURL retargets the GitHub API the mint path talks to, and is empty for
+	// api.github.com. The seam the e2e points at an in-cluster mock: a stage that
+	// needs a real App credential is a stage that skips, and a skipped stage proves
+	// nothing. Used as given — no `/api/v3/` is appended — so one environment
+	// variable means the same thing here and on the orchestrator's own client.
+	BaseURL string
 }
 
 // refreshSkew is how much of an installation token's life we refuse to use.
@@ -69,6 +76,11 @@ func mintedGitHub(ctx context.Context, app GitHubApp, opts ...ghait.Option) (*Cr
 	// so an operator behind a corporate egress proxy or a private CA gets
 	// https_proxy and SSL_CERT_FILE/SSL_CERT_DIR honoured with no code at all.
 	// Handing it one would take that away silently.
+	if app.BaseURL != "" {
+		// Prepended, so an option a caller passed explicitly still wins — which is
+		// how mint_test points this at its own httptest GitHub.
+		opts = append([]ghait.Option{ghait.WithURLs(app.BaseURL, app.BaseURL)}, opts...)
+	}
 	g, err := ghait.NewGHAIT(ctx, cfg, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub App %d via %s: %w", app.AppID, app.Provider, err)
@@ -108,7 +120,7 @@ type minter struct {
 }
 
 func (m *minter) token(ctx context.Context, run Run) (string, error) {
-	if !run.complete() {
+	if !run.Complete() {
 		// Unreachable through the proxy — authenticate() refuses an incomplete
 		// claim before anything gets this far — but a mint scoped to "" is the
 		// one mistake here that is worth failing loudly rather than defensively.

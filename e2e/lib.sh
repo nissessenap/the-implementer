@@ -137,6 +137,57 @@ load_image() {
   fi
 }
 
+# The GitHub mock stages point GITHUB_API_URL at, and the reason it is here rather
+# than in the stage that first needed it: issue #72 asks for the mock to be
+# infrastructure a later ticket adds *assertions* to, not one it re-stands-up.
+#
+# Where the *harness* reaches it, which is a different address from the Service the
+# in-cluster side would use: the orchestrator is a command line until the webhook
+# front-end lands, so it runs on this machine and reaches the mock through a
+# forward. The port is the knob and the URL is derived, so the two cannot disagree.
+GITHUB_MOCK_PORT=${GITHUB_MOCK_PORT:-18080}
+GITHUB_MOCK_ADDR=http://127.0.0.1:$GITHUB_MOCK_PORT
+
+# github_mock_up — apply the Deployment, wait for it, and leave a port-forward behind
+# on $GITHUB_MOCK_ADDR. Idempotent, so a stage run on its own stands it up and a
+# later one finds it there — which is why it also does not reset the mock's state:
+# that is `POST /_reset`, and it is the calling stage's business.
+#
+# ponytail: it does *not* install an EXIT trap, unlike openbao_up. bash has exactly
+# one, and a stage that needs this also has litter of its own — so the caller owns
+# the trap and calls github_mock_down from it. A third caller of either wants a real
+# cleanup stack instead of this note.
+github_mock_up() {
+  kubectl apply -n "$NS" -f "$E2E_DIR/github-mock.yaml" >/dev/null
+  kubectl -n "$NS" rollout status deploy/github-mock --timeout=180s
+  kubectl -n "$NS" port-forward deploy/github-mock "$GITHUB_MOCK_PORT:8080" >/dev/null 2>&1 &
+  GITHUB_MOCK_PF=$!
+  for _ in $(seq 30); do
+    # The forward is a *background* job, so `set -e` cannot see it fail and its
+    # output is discarded: a port already in use leaves this loop polling whatever
+    # else answers there. Checked before the health probe rather than trusted after.
+    kill -0 "$GITHUB_MOCK_PF" 2>/dev/null || {
+      echo "!!! FAIL: the port-forward to github-mock died — is $GITHUB_MOCK_PORT in use?" >&2
+      return 1
+    }
+    curl -sf --max-time 2 "$GITHUB_MOCK_ADDR/_calls" >/dev/null && return 0
+    sleep 1
+  done
+  echo "!!! FAIL: no github-mock on $GITHUB_MOCK_ADDR (is the port already in use?)" >&2
+  return 1
+}
+
+# github_mock_down — kill the port-forward *and reap it*. `kill` returns when the
+# signal is sent, not when the socket is released, so without the wait a stage that
+# rebinds the same port seconds later fails occasionally and never reproduces.
+github_mock_down() {
+  [[ -n ${GITHUB_MOCK_PF:-} ]] || return 0
+  kill "$GITHUB_MOCK_PF" 2>/dev/null || true
+  # `|| true` on both: a reaped child killed by the SIGTERM above exits 143, and this
+  # runs from an EXIT trap where a non-zero last command is the *stage's* status.
+  wait "$GITHUB_MOCK_PF" 2>/dev/null || true
+}
+
 # OpenBao, the networked signer stages 55 and 60 sign the App JWT through. A dev
 # root token the harness invents, exactly like RUN_KEY above: it is a literal
 # because this OpenBao is the harness's own, in-memory, and gone with the pod.

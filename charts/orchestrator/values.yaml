@@ -1,10 +1,15 @@
 # ponytail: this chart renders the run's Job template, a ServiceAccount and a
 # Role, and no Deployment — because there is nothing to deploy yet. The
-# orchestrator is a command line at this point, and its own four environment
-# variables (POD_NAMESPACE, PROXY_HOST, RUN_KEY_FILE, JOB_TEMPLATE_FILE) are
-# supplied by whoever runs it. They become values here when the webhook front-end
-# lands and there is a Deployment to put them on; putting them here first would be
-# two operator-facing values that nothing reads.
+# orchestrator is a command line at this point, and its own environment is supplied
+# by whoever runs it: POD_NAMESPACE, PROXY_HOST, RUN_KEY_FILE and JOB_TEMPLATE_FILE
+# for `run`, plus GITHUB_APP_ID, GITHUB_APP_PROVIDER, GITHUB_APP_KEY and the
+# optional GITHUB_API_URL for `watch`. They become values here when the webhook
+# front-end lands and there is a Deployment to put them on; putting them here first
+# would be operator-facing values that nothing reads.
+#
+# GITHUB_APP_KEY is a *reference* and never key bytes — a KMS crypto key version, or
+# a transit key — because the provider is chosen at build time exactly as the
+# proxy's is, and the production build has no PEM signer linked in at all.
 #
 # PROXY_HOST is the credential proxy's Service name as the *sandbox* resolves it —
 # so a proxy in another namespace is `credential-proxy.other.svc.cluster.local`.
@@ -79,8 +84,9 @@ sandbox:
 
   # The e2e seam, and the one knob here that is not for operators: it replaces the
   # image's phase script with an inline shell script, so a stage can run a probe
-  # container in a Job this chart and this builder produced. e2e/80-orchestrator.sh
-  # is the only thing that sets it.
+  # container in a Job this chart and this builder produced. Only the e2e sets it —
+  # stage 80 for the Job builder's probe, stage 90 for a run that writes a result
+  # blob and two that never end on their own.
   script: ""
 
 # Commit attribution. Here rather than in the builder because it is the operator's

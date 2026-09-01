@@ -18,6 +18,15 @@ import (
 	"github.com/nissessenap/the-implementer/proxy"
 )
 
+// The one label the builder writes, and the selector the informer lists and watches
+// on. Two constants rather than a map literal because the informer needs it as a
+// selector string: identity itself is in *annotations*, because a label value caps
+// at 63 characters and repository names run past it.
+const (
+	runLabelKey   = "app"
+	runLabelValue = "implementer"
+)
+
 // The port the proxy listens on. Not a knob here for the same reason it is not
 // one there: the sandbox is handed a URL naming it, so a second place to change
 // it is only a second place to get it wrong.
@@ -123,7 +132,7 @@ func (c Config) Build(r proxy.Run) *batchv1.Job {
 	// Identity is in annotations and not labels, because a label *value* caps at
 	// 63 characters and repository names run past it — the same cliff the name
 	// hits. One label exists, for listing.
-	lbl := map[string]string{"app": "implementer"}
+	lbl := map[string]string{runLabelKey: runLabelValue}
 	j.Labels = merge(j.Labels, lbl)
 	j.Spec.Template.Labels = merge(j.Spec.Template.Labels, lbl)
 
@@ -240,13 +249,27 @@ func Phase(ctx context.Context, c kubernetes.Interface, ns, name string) string 
 	if err != nil {
 		return "unreadable"
 	}
-	for _, cond := range j.Status.Conditions {
-		if cond.Status == corev1.ConditionTrue &&
-			(cond.Type == batchv1.JobComplete || cond.Type == batchv1.JobFailed) {
-			return string(cond.Type)
-		}
+	if cond := terminal(j); cond != nil {
+		return string(cond.Type)
 	}
 	return "active"
+}
+
+// terminal is the one definition of "this run has ended", shared by the line above
+// and by the informer's decision to report — so a run the operator is told is
+// `active` is exactly a run the informer has not commented on.
+//
+// The two conditions that mean it, and only those: newer Kubernetes sets interim
+// conditions (`SuccessCriteriaMet`, `FailureTarget`) on the way to them, and
+// reporting on one of those would comment before the pod's own status has settled.
+func terminal(j *batchv1.Job) *batchv1.JobCondition {
+	for i, cond := range j.Status.Conditions {
+		if cond.Status == corev1.ConditionTrue &&
+			(cond.Type == batchv1.JobComplete || cond.Type == batchv1.JobFailed) {
+			return &j.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 func merge(into, from map[string]string) map[string]string {

@@ -56,6 +56,59 @@ docker run --rm --tmpfs /workspace --tmpfs /tmp --tmpfs /home/agent \
 Both need a repository whose `implementer/` branch prefix you are happy to have
 pushed to. Expect ~450s and ~$2 for three phases against a small repo.
 
+### The orchestrator's informer
+
+`orchestrator watch` is ADR 0004's informer half. It watches the Jobs in its
+namespace, reads their pods on demand, and gives every ending one issue comment —
+built from the run plan's blob when there is one, and from the Kubernetes-level
+reason when there is not.
+
+```sh
+POD_NAMESPACE=… GITHUB_APP_ID=… GITHUB_APP_PROVIDER=gcp GITHUB_APP_KEY=… \
+  orchestrator watch          # the informer, until SIGTERM
+orchestrator watch -once      # relist, report what has ended, exit
+```
+
+Three things about it are load-bearing and easy to "simplify" back out:
+
+- **The second shape is the reason it exists.** `OOMKilled`,
+  `activeDeadlineSeconds`, eviction and `ImagePullBackOff` run no in-pod code at
+  all, so nothing inside the sandbox can report them. Delete this component and a
+  run that dies that way leaves the issue labelled `ready-for-agent` with nobody
+  ever told it happened.
+- **The Job is the trigger; the pod is the result.** The blob is the container's
+  terminated `message` and the digest is its `imageID`, so the pod is read (by run
+  annotation, not by job name) on every report — but nothing *watches* one. The Job's
+  terminal condition is the only signal that covers every ending: the controller
+  defers it until the pods are terminal (1.31), so the blob is already readable when
+  it arrives, and when the deadline expires it **deletes** the pod, leaving the
+  condition as the sole record of the one ending a human has no other way to learn
+  about. A Pod informer as well would only ever fire too early to report or after
+  the Job event already did.
+- **The exactly-once record is the comment.** `<!-- implementer-run: <uid> -->` on
+  its first line, scanned for before every write. There is no database (ADR 0004)
+  and the RBAC is read-only on Pods and Jobs, so there is nowhere in Kubernetes to
+  mark a run as reported — which is also why nothing here needs to survive a
+  restart, and why the in-process `done` set is a cost optimisation and never the
+  argument.
+
+`GITHUB_API_URL` is the seam, handed to both clients — ghait's mint path and the
+orchestrator's own calls — and it is what stage 90 points at a mock.
+
+### The Kubernetes versions this targets
+
+**1.35–1.37**, which is what upstream supports as of 2026-09-01, and it moves: a
+version leaves this window roughly every four months. Scope to what those releases
+have and nothing older. Concretely, that means no compatibility branch for a
+behaviour a supported release does not exhibit — the pod carries
+`batch.kubernetes.io/job-name` (`batchv1.JobNameLabel`, GA since 1.27), so the
+informer reads that and not the unprefixed legacy label, and the Job controller
+defers the terminal condition until its pods are terminal (1.31), which is what
+makes stage 90's "the pod is gone" assertion reliable rather than a race.
+
+A feature younger than 1.35 is fair game. A workaround for one older than it is
+dead code that nobody will ever delete, because nobody can prove it is unreachable.
+
 ### Running the credentialed e2e stages
 
 Stage 50 needs a real GitHub token. `gh auth token` prints the logged-in one, so
@@ -137,3 +190,15 @@ Stage 70, the model route, needs no credentials and never skips: it runs against
 not replace it with a stage that mounts a Google credential — the reason is GAR's
 above, spelled out in ADR 0005, and what the mock cannot prove is pinned by
 `proxy/vertex_test.go`.
+
+Stage 90, the informer, needs no credentials and never skips either: GitHub is a
+**mock** behind the `GITHUB_API_URL` seam, and the App JWT is signed by ghait's
+`file` provider against a key the stage generates and throws away. Production links
+`ghait.no_file` and cannot sign that way at all, which is why `make test` builds
+`./cmd/orchestrator` under the production tags.
+
+What only a cluster can prove there is the ending with no result: the stage patches
+`activeDeadlineSeconds` down on a running Job, the Job controller deletes the pod,
+and the comment is built from the Job's condition alone. Do not replace that with a
+unit test — `orchestrator/informer_test.go` already covers the decision, and what
+this stage covers is that the pod really is gone.

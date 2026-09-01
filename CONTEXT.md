@@ -17,6 +17,27 @@ Pods and acts on the terminal one. It holds no run state of its own: state lives
 in Kubernetes objects and GitHub, so **v1 has no database**. See
 [ADR 0004](docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md).
 
+**Silent death** — a run that ends with **no in-pod code having executed**:
+`OOMKilled`, `activeDeadlineSeconds`, eviction, `ImagePullBackOff`. No trap fires,
+no phase script runs, nothing reaches `/dev/termination-log`. It is the deciding
+reason the informer exists, and it is routine rather than pathological — a
+transient 529 burned a run in the prototype. A pod cannot report its own death,
+which is the same argument ADR 0004 uses against an in-pod PR builder: move the
+reporting inside the sandbox and it moves the failure path into the thing that
+fails. What it costs when nothing is watching is not a lost result but a *silent*
+one — the issue sits there labelled `ready-for-agent` and nobody is ever told the
+run happened.
+
+**Run marker** — the `<!-- implementer-run: <run-uid> -->` line the informer puts
+first in every comment it posts, and scans the thread for before posting. It is the
+whole of exactly-once: there is no database to keep a dedupe table in, and the
+orchestrator's RBAC is read-only on Pods and Jobs so it cannot mark the run as
+reported in Kubernetes either. So the record lives in GitHub, where the other half
+of this system's state already does — which is what makes redelivery, a second
+label and a restart mid-run all cost one comment and no more. Keyed on the *run*
+uid rather than the issue, for the same reason the credential is: a re-run is a new
+run and gets its own comment.
+
 **Credential proxy** — the Deployment every credential terminates at. The
 sandbox holds none: it sends unsigned model requests and a **sentinel** GitHub
 credential, and the proxy attaches the real ones. It is the only component with
@@ -314,14 +335,18 @@ survives the ephemeral `HOME`.
 **Result channel** — how data leaves the sandbox without `kubectl exec`. A compact
 structured result via `/dev/termination-log`, surfaced on pod status; the full
 transcript via `pods/log`. Both are pod-level, which is why the orchestrator's
-informer watches Pods rather than Jobs.
+informer reads the run's pod on every report — but it *watches* Jobs, whose terminal
+condition is the one signal that also covers the ending that leaves no pod behind
+(ADR 0004, amended 2026-08-31 and 2026-09-01).
 
 **Result blob** — the JSON the phase script accumulates and writes once onto
 `/dev/termination-log`: overall status, branch, commit count, summed cost, elapsed,
 `pr_title` and a status/summary line per phase. An interface rather than a
-convenience, because the orchestrator's PR builder is its consumer — typed in
-`sandbox/phase_test.go`, bounded field by field so the kubelet's blind 4096-byte
-truncation cannot corrupt it.
+convenience, and it has two ends now: written by `sandbox/phase.sh`, decoded by the
+orchestrator's informer, and typed once in `sandbox/result.go` so the two cannot
+disagree about the shape. Bounded field by field so the kubelet's blind 4096-byte
+truncation cannot corrupt it. **A pod killed by a signal writes it not at all**,
+which is the case the informer's second shape exists for.
 
 **`completed_unreviewed`** — the run status when the implement phase landed and a
 review phase died. Nothing gates the pull request: the branch is pushed anyway and
