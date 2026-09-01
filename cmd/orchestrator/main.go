@@ -85,9 +85,13 @@ func run(args []string) {
 	ctx, kube := context.Background(), client()
 	// One word first, then the reference: the e2e reads $2 off this line, and a
 	// verb with a space in it would make the parse depend on which branch ran.
-	name, verb, err := startRun(ctx, kube, cfg, r, *dry)
+	name, created, err := startRun(ctx, kube, cfg, r, *dry)
 	if err != nil {
 		log.Fatal(err)
+	}
+	verb := "exists" // the name collided at the apiserver
+	if created {
+		verb = "created"
 	}
 	// The existing Job's phase, appended *last* so $1 and $2 stay what the e2e
 	// reads. Without it `exists` covers two different situations: a redelivery,
@@ -97,10 +101,9 @@ func run(args []string) {
 	// is a policy question above this line; being able to see which one happened
 	// is not.
 	state := ""
-	if verb == "exists" {
+	if !created {
 		state = " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, name) + ")"
 	}
-	// Appended after the phase is read, or the read would key off the decorated verb.
 	if *dry {
 		verb += "-dry-run"
 	}
@@ -124,12 +127,8 @@ func serve(args []string) {
 		usage()
 	}
 
-	// ponytail: ADR 0003's detection is a later ticket, so until it lands the
-	// toolchain is one value for every repository this installation serves — and
-	// unset is legal, meaning the review phase runs with no language subagent.
-	// Detection replaces this read entirely rather than defaulting it, and it is
-	// also the first thing that puts a GitHub credential in this half of the
-	// process, which is why it is not a smaller change than it looks.
+	// ponytail: one toolchain for the whole installation until ADR 0003's detection
+	// lands — see charts/orchestrator/values.yaml. Unset is legal.
 	cfg := runConfig(os.Getenv("TOOLCHAIN"))
 	kube := client()
 
@@ -142,7 +141,7 @@ func serve(args []string) {
 			// The run's second factor, fresh per run — see `run` above for why it
 			// is not per issue, and why a swallowed AlreadyExists discards it.
 			r.UID = uid()
-			name, verb, err := startRun(ctx, kube, cfg, r, false)
+			name, created, err := startRun(ctx, kube, cfg, r, false)
 			if err != nil {
 				return err
 			}
@@ -151,8 +150,9 @@ func serve(args []string) {
 			// TTL keeps a terminal Job for a day. The response body cannot carry
 			// this — nobody reads the App's delivery page — so the log is where a
 			// silently-dropped retry becomes visible at all.
-			if verb == "exists" {
-				verb += " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, name) + ")"
+			verb := "created"
+			if !created {
+				verb = "exists (" + orchestrator.Phase(ctx, kube, cfg.Namespace, name) + ")"
 			}
 			log.Printf("webhook: %s %s/%s %s", verb, cfg.Namespace, name, r)
 			return nil
@@ -206,20 +206,15 @@ func serve(args []string) {
 
 // startRun is the whole of "turn a run into an object", and it is shared so that a
 // Job a webhook created and a Job a command line created differ in nothing but who
-// asked. Returns the Job's name and the one word that says which of the two
-// happened: `created`, or `exists` for a name that collided at the apiserver — a
-// redelivery, a second label, or a re-run of a Job the TTL still holds.
-func startRun(ctx context.Context, kube kubernetes.Interface, cfg orchestrator.Config, r proxy.Run, dry bool) (name, verb string, err error) {
+// asked. False means the name collided at the apiserver — a redelivery, a second
+// label, or a re-run of a Job the TTL still holds.
+func startRun(ctx context.Context, kube kubernetes.Interface, cfg orchestrator.Config, r proxy.Run, dry bool) (name string, created bool, err error) {
 	job := cfg.Build(r)
-	created, err := orchestrator.Create(ctx, kube, job, dry)
+	created, err = orchestrator.Create(ctx, kube, job, dry)
 	if err != nil {
-		return job.Name, "", fmt.Errorf("creating job %s: %w", job.Name, err)
+		return job.Name, false, fmt.Errorf("creating job %s: %w", job.Name, err)
 	}
-	verb = "exists"
-	if created {
-		verb = "created"
-	}
-	return job.Name, verb, nil
+	return job.Name, created, nil
 }
 
 // runConfig is everything the Job builder needs that is not the run, read from the

@@ -118,18 +118,15 @@ func TestLabelStartsARun(t *testing.T) {
 
 // Redelivery and a second label are the same request twice, and the handler adds
 // no dedupe state — which is the requirement: idempotency is the Job name plus a
-// swallowed AlreadyExists, and this must not defeat it by, say, keying anything on
-// the delivery id. So both deliveries start a run and both runs have the same name.
-func TestRedeliveryResolvesToOneJobName(t *testing.T) {
+// swallowed AlreadyExists, and this must not defeat it by dropping the second
+// delivery here. Both start a run; the apiserver is what collapses them.
+func TestRedeliveryStartsBothRuns(t *testing.T) {
 	body := payload("labeled", readyLabel, "a-maintainer", "User")
 	h, started := recorder()
 	deliver(t, h, "issues", body)
 	deliver(t, h, "issues", body)
 	if len(*started) != 2 {
 		t.Fatalf("started %d runs across two deliveries, want 2", len(*started))
-	}
-	if a, b := JobName((*started)[0]), JobName((*started)[1]); a != b {
-		t.Errorf("redelivery derived %q, first delivery derived %q", b, a)
 	}
 }
 

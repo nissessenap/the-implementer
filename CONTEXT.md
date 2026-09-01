@@ -20,28 +20,11 @@ in Kubernetes objects and GitHub, so **v1 has no database**. See
 **Trigger** — a signed `issues`/`labeled` webhook carrying the `ready-for-agent`
 label, which is the label `/triage` already produces, so the readiness contract is
 inherited rather than reinvented. The front-end creates one Job and is **done** — it
-does not wait for the run. Two properties of it are counter-intuitive enough to be
-worth stating here rather than only in the ADR:
-
-**Payload authorization** — the whole of it: the sender's `type` must be `User` and
-its `login` must not be `ghost`. **No permission API call**, because the obvious
-design has it backwards in both directions. The flatt.tech disclosure is read as
-proof a write check is mandatory; `claude-code-action` **had** one and was bypassed
-anyway, through a login ending in `[bot]`, by an attacker with no access to the
-target repository at all — so the clause usually omitted is the one that was
-exploited and the clause usually insisted on is the one that failed to help. `ghost`
-is beside the type check because GitHub substitutes that account for unresolvable
-actors and *its type is `User`*. Labelling needs Triage, so the event proves triage
-and nothing more; the escalation ceiling is a branch and a pull request nothing here
-can merge.
-
-**Silent refusal** — an unauthorized sender is logged and nothing else. There is no
-"sorry, you're not allowed" comment, because on a public repository that is an
-on-demand way to make the App write to issues with untrusted input in hand — so the
-front-end holds no GitHub credential at all and there is nothing there to write
-with. The only refusals a human sees in v1 are the toolchain ones. The
-**edit-after-label window** stays open on purpose: authorization is at webhook time,
-the issue text is fetched at run time, and neither clause looks at the text.
+does not wait for the run. Its authorization is two clauses on the payload and no
+permission API call, and an unauthorized sender is refused *silently*; both are
+counter-intuitive, and
+[ADR 0004](docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md)
+says why.
 
 **Silent death** — a run that ends with **no in-pod code having executed**:
 `OOMKilled`, `activeDeadlineSeconds`, eviction, `ImagePullBackOff`. No trap fires,

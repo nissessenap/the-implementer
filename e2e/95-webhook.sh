@@ -31,7 +31,6 @@ ORCH=${ORCH:-implementer-orchestrator}
 RUN_REPO=${E2E_MOCK_REPO:-acme/widgets}
 # The one delivery that must start a run, and one issue per ignored case.
 RUN_ISSUE=4242
-OTHER_LABEL_ISSUE=4301
 NO_LABEL_ISSUE=4302
 BOT_ISSUE=4303
 GHOST_ISSUE=4304
@@ -206,28 +205,19 @@ UID_AFTER=$(kubectl -n "$NS" get "job/$JOB" -o jsonpath='{.metadata.annotations.
 echo "PROBE idempotency      3 deliveries, 1 Job, uid unchanged"
 
 stage "everything that is not a run"
+# Three cases and not the whole table: `orchestrator/webhook_test.go` covers the
+# decision for every shape, and a cluster adds nothing to "some other label". These
+# three are the ones with a *cluster-level* assertion below them — the label-less
+# payload for the panic check, the bot and ghost senders for the refusal log.
 # 200 on all of them, deliberately: a non-2xx marks the delivery failed on the
 # App's own page and invites GitHub to redeliver an event we will ignore again.
-want "$(deliver issues "$(payload labeled needs-triage a-maintainer User "$OTHER_LABEL_ISSUE")")" \
-  200 1 "some other label"
-# The payload trap: `label` is not in the required set, so this is a delivery
-# GitHub can really send. Ignored, and — asserted below — not a panic.
 want "$(deliver issues "$(payload labeled '' a-maintainer User "$NO_LABEL_ISSUE")")" \
   200 1 "labeled with no label object"
-# The clause the flatt.tech bypass actually turned on. The attack needs no access
-# to the target repository: install your own App on your own repository and use its
-# installation token here.
 want "$(deliver issues "$(payload labeled ready-for-agent 'some-app[bot]' Bot "$BOT_ISSUE")")" \
   200 1 "a bot sender"
-# Substituted by GitHub for an unresolvable actor, and its type is `User` — so the
-# type assertion alone lets it through.
 want "$(deliver issues "$(payload labeled ready-for-agent ghost User "$GHOST_ISSUE")")" \
   200 1 "the ghost sender"
-want "$(deliver issues "$(payload unlabeled ready-for-agent a-maintainer User "$OTHER_LABEL_ISSUE")")" \
-  200 1 "unlabeled"
-# The delivery GitHub sends the moment the webhook is created.
-want "$(deliver ping '{"zen":"Non-blocking is better than blocking."}')" 200 1 "a ping"
-echo "PROBE ignored          other label, no label, bot, ghost, unlabeled, ping — no Job for any"
+echo "PROBE ignored          no label, bot, ghost — no Job for any"
 
 stage "an invalid signature is rejected"
 want "$(deliver issues "$(payload labeled ready-for-agent a-maintainer User "$BAD_SIG_ISSUE")" \

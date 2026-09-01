@@ -36,7 +36,7 @@ const readyLabel = "ready-for-agent"
 // Two acceptance criteria are structural because of it: there is no call to the
 // collaborator-permission endpoint anywhere in this path, and the refusal below is
 // silent because there is nothing here that *could* write to GitHub. Adding a
-// client to report a refusal is the vulnerability, not the fix — see refuse().
+// client to report a refusal is the vulnerability, not the fix.
 type Webhook struct {
 	// Secret is the webhook secret, and an empty one is refused at every request
 	// rather than tolerated: go-github validates nothing when the secret is empty
@@ -160,38 +160,23 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization, and it is these two clauses rather than a permission API call.
+	// Authorization: two clauses on the payload, and no permission API call. ADR
+	// 0004 says why the obvious design has it backwards in both directions — the
+	// clause usually omitted is the one the flatt.tech bypass turned on, and the one
+	// usually insisted on is the one that failed to help. `ghost` is folded in
+	// case-insensitively because GitHub substitutes it for unresolvable actors and
+	// **its type is `User`**, so the type assertion alone lets it through. The
+	// edit-after-label window it does not cover is #32, and deliberately open.
 	//
-	// The flatt.tech disclosure is usually cited as proof a write-access check is
-	// mandatory; it says the opposite. `claude-code-action` **had** one and was
-	// bypassed anyway, because it opened by returning true for any actor whose
-	// login ended in `[bot]` — and the attack needs no access to the target
-	// repository at all: create a GitHub App, install it on your *own* repository,
-	// use its installation token against the target. The fix was to assert the
-	// actor's type is `User`. So the clause usually omitted is the one that was
-	// exploited, and the clause usually insisted on is the one that failed to help.
-	//
-	// `ghost` is here beside it because GitHub substitutes that account for
-	// unresolvable actors and **its type is `User`**, so the type assertion alone
-	// lets it through. Folded, because logins are matched case-insensitively.
-	//
-	// No write check, deliberately: applying a label needs Triage, not write, so
-	// the event proves triage and nothing more — and triage is trust enough here.
-	// The escalation ceiling is a branch plus a pull request **no component in this
-	// system can merge**, and the residual cost is agent budget and branch noise,
-	// spent by someone a maintainer deliberately granted triage. It also deletes an
-	// unverifiable dependency: which fine-grained permission the
-	// collaborator-permission endpoint requires could not be established, because
-	// GitHub's public OpenAPI encodes no fine-grained permissions for it.
-	//
-	// What this does *not* cover is the edit-after-label window — authorization is
-	// here, at webhook time, while the pod fetches the issue text at run time, so
-	// the text is mutable in between by someone never authorized. That is #32, it
-	// survives both clauses because neither looks at the text, and it is
-	// deliberately not fixed here.
-	sender := e.GetSender()
-	if sender.GetType() != "User" || strings.EqualFold(sender.GetLogin(), "ghost") {
-		refuse(w, &e)
+	// **The silence is the security property**: logged, and nothing else. A "sorry,
+	// you're not allowed" comment on a public repository would hand an unauthorized
+	// actor an on-demand way to make the App write to issues, so the type above holds
+	// no GitHub client and there is nothing here to write with. The only refusals a
+	// human ever sees in v1 are the toolchain ones, with ADR 0003's detection.
+	if sender := e.GetSender(); sender.GetType() != "User" || strings.EqualFold(sender.GetLogin(), "ghost") {
+		log.Printf("webhook: ignoring %s#%d: sender %q is type %q", e.GetRepo().GetFullName(),
+			e.GetIssue().GetNumber(), sender.GetLogin(), sender.GetType())
+		ignore(w, "sender")
 		return
 	}
 
@@ -234,22 +219,4 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func ignore(w http.ResponseWriter, format string, args ...any) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "ignored: "+format+"\n", args...)
-}
-
-// refuse is the authorization refusal, and **the silence is the security
-// property**. It logs, answers GitHub, and does nothing else.
-//
-// There is deliberately no "sorry, you're not allowed" comment. On a public
-// repository that would hand an unauthorized actor an on-demand way to make the App
-// write to issues — precisely the `issues: write` plus untrusted-input combination
-// the disclosure flags. A friendly refusal here is the vulnerability, so the type
-// above holds no GitHub client at all and there is nothing to write with.
-//
-// The only refusals a human ever sees in v1 are the toolchain ones, which arrive
-// with ADR 0003's detection.
-func refuse(w http.ResponseWriter, e *github.IssuesEvent) {
-	log.Printf("webhook: ignoring %s#%d: sender %q is type %q",
-		e.GetRepo().GetFullName(), e.GetIssue().GetNumber(),
-		e.GetSender().GetLogin(), e.GetSender().GetType())
-	ignore(w, "sender")
 }

@@ -5,12 +5,9 @@
        so there is no pair that can disagree. */}}
 {{- if .Values.image }}
 {{- if not .Values.webhook.secretName }}
-{{- /* Refused rather than defaulted, and it is the one guard here that is a
-       security property. go-github validates nothing when the secret is empty and
-       no signature arrives, so an unset secret is not a broken webhook — it is an
-       open trigger for anything that can reach the Service, and every legitimate
-       delivery still works. There is nothing to discover it by. cmd/orchestrator
-       refuses the same shape at boot, for anyone deploying without this chart. */}}
+{{- /* An unset secret is an open trigger rather than a broken webhook — see
+       orchestrator/webhook.go. Refused here as well as at boot, so it fails
+       before the install rather than as a CrashLoopBackOff. */}}
 {{- fail "webhook.secretName is required: it is the Secret holding the webhook secret, and an unset secret is an open trigger rather than a broken one" }}
 {{- end }}
 # The webhook front-end (ADR 0004). It creates one Job per labelled issue and is
@@ -82,10 +79,8 @@ spec:
                 secretKeyRef: { name: {{ .Values.webhook.secretName }}, key: secret }
             - { name: JOB_TEMPLATE_FILE, value: /run/job-template/job.yaml }
             {{- with .Values.toolchain }}
-            # ponytail: ADR 0003's detection is a later ticket, so until it lands
-            # this is one answer for every repository the installation serves.
-            # Unset is legal and means the review phase runs with no language
-            # subagent. Detection deletes this value rather than defaulting it.
+            # ponytail: one toolchain for the installation until ADR 0003's
+            # detection lands — see values.yaml. Unset is legal.
             - { name: TOOLCHAIN, value: {{ . | quote }} }
             {{- end }}
           ports:

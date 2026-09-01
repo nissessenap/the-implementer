@@ -72,34 +72,24 @@ make orchestrator-image                        # the reference the chart's `imag
 ./e2e/95-webhook.sh                            # a signed POST at the Service, no tunnel
 ```
 
-Five things here are load-bearing, and three of them look like things to harden:
+Five things here are load-bearing, and three of them look like things to harden.
+[ADR 0004][adr4] argues all five; what matters when editing this code is that each
+one is a decision and not an omission:
 
 - **The label is a constant, not a value.** `ready-for-agent`, the one `/triage`
-  produces. #73 defers configurability to "per installation later" — and an
-  installation is a GitHub App installation, so what eventually reads it is a
-  per-installation lookup, not an env var on a Deployment. Shipping the env var first
-  would be neither, and would need keeping alive while the real thing replaced it.
+  produces. Configurability is deferred to a per-installation lookup, so an env var
+  now would be a knob to keep alive while the real thing replaced it.
 - **`palantir/go-githubapp` is deliberately not used**, against the ticket's
-  wording. Its dispatcher *is* `github.ValidatePayload` plus a map lookup, and
-  go-github is already a dependency — while the half that would earn the dependency,
-  its `ClientCreator`, wants the App's private key as PEM bytes, which ADR 0005's
-  signing seam exists to make impossible here. It also pins go-github **v90**
-  against this repo's v88. So it would cost two majors of one library, `zerolog` and
-  `go-metrics` to replace one function call with a worse-fitting one.
+  wording: its dispatcher *is* `github.ValidatePayload`, its `ClientCreator` wants
+  the App key as PEM bytes that ADR 0005 exists to keep out, and it pins go-github
+  **v90** against this repo's v88.
 - **The authorization is two clauses on the payload and no permission API call.**
-  `sender.type != "User" || sender.login == "ghost"` → ignore. The flatt.tech
-  disclosure is usually read as proof a write check is mandatory; it says the
-  opposite — `claude-code-action` **had** one and was bypassed, because it returned
-  true for any login ending in `[bot]`, and the attack needs no access to the target
-  repository at all. The fix was the type assertion. `ghost` is beside it because
-  GitHub substitutes that account for unresolvable actors and **its type is
-  `User`**. `make test` asserts the absence with a `grep`, because "there is no call
-  to the collaborator-permission endpoint" is the criterion.
-- **The refusal is silent, and that is the security property.** A "sorry, you're
-  not allowed" comment on a public repository hands an unauthorized actor an
-  on-demand way to make the App write to issues. So the front-end holds **no GitHub
-  credential of any kind** — there is nothing there to write with, and stage 95
-  asserts the Deployment mounts none.
+  `sender.type != "User" || sender.login == "ghost"` → ignore. `make test` asserts
+  the absence with a `grep`, because "there is no call to the
+  collaborator-permission endpoint" is the criterion.
+- **The refusal is silent, and that is the security property.** The front-end holds
+  **no GitHub credential of any kind** — there is nothing there to write with, and
+  stage 95 asserts the Deployment mounts none.
 - **`label` is not in the payload's required set** — that is `[action, issue,
   repository, sender]`. A `labeled` delivery with no label object is a real shape
   and must be ignored rather than dereferenced; `GetLabel().GetName()` answering
@@ -118,10 +108,10 @@ run the TTL still holds creates nothing, and the delivery page nobody reads is t
 only other place that could say so).
 
 Idempotency adds nothing: a redelivery, a second label and a restart all resolve to
-the Job name plus a swallowed `AlreadyExists`. Nothing here may key on the delivery
-id, which would defeat it. The **edit-after-label window** is #32 and deliberately
-open — authorization happens here, the pod fetches the issue text at run time, and
-neither clause above looks at the text.
+the Job name plus a swallowed `AlreadyExists`, and nothing here may key on the
+delivery id. The **edit-after-label window** is #32 and deliberately open.
+
+[adr4]: docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md
 
 ### The orchestrator's informer
 
