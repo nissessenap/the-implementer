@@ -31,10 +31,14 @@ spec:
   # this becomes a value when leader election lands and not before.
   replicas: 1
   selector:
-    matchLabels: { app: {{ .Release.Name }} }
+    # `component` and not `app` alone: every sandbox pod carries app=implementer
+    # (orchestrator/job.go's run label), so a release *named* implementer would make
+    # the Service below select the run pods too and load-balance deliveries into
+    # sandboxes. Immutable on an existing Deployment, so changing it is a reinstall.
+    matchLabels: { app: {{ .Release.Name }}, component: webhook }
   template:
     metadata:
-      labels: { app: {{ .Release.Name }} }
+      labels: { app: {{ .Release.Name }}, component: webhook }
       annotations:
         # Rolls the pod when the Job template changes, because the file is read
         # once at boot: without this an operator edits the sandbox posture, helm
@@ -92,6 +96,13 @@ spec:
           # server either way, so the cheaper probe buys nothing.
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
+          # The half of "drained rather than dropped" that Go cannot do: SIGTERM and
+          # the endpoint removal race, so without this a delivery arriving in that
+          # window is refused — and GitHub does not retry, it only marks the delivery
+          # failed. The `sleep` action needs no shell, which ko's base does not have.
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }
           volumeMounts:
             - { name: run-key, mountPath: /run/run-key, readOnly: true }
             - { name: job-template, mountPath: /run/job-template, readOnly: true }
@@ -107,7 +118,7 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}
 spec:
-  selector: { app: {{ .Release.Name }} }
+  selector: { app: {{ .Release.Name }}, component: webhook }
   ports:
     - { port: 8080, targetPort: 8080 }
 {{- /* No Ingress, and none is owed. How a delivery reaches this Service is the

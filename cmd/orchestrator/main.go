@@ -146,34 +146,54 @@ func serve(args []string) {
 			if err != nil {
 				return err
 			}
+			// The same disambiguation `run` prints, for the same reason: `exists`
+			// is a redelivery *or* a re-label of a run that already ended, and the
+			// TTL keeps a terminal Job for a day. The response body cannot carry
+			// this — nobody reads the App's delivery page — so the log is where a
+			// silently-dropped retry becomes visible at all.
+			if verb == "exists" {
+				verb += " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, name) + ")"
+			}
 			log.Printf("webhook: %s %s/%s %s", verb, cfg.Namespace, name, r)
 			return nil
 		},
 	}
 
-	mux := http.NewServeMux()
-	// A method pattern, so a GET here is a 405 rather than a signature failure that
-	// reads like a secret mismatch. MaxBytesHandler because ValidatePayload reads
-	// the whole body before it can verify anything, and the body is the one input
-	// this endpoint accepts from the internet — 25MB is GitHub's own payload cap.
-	mux.Handle("POST /webhook", http.MaxBytesHandler(h, 25<<20))
-	// The readiness probe. "The listener is up" is the whole of this component's
-	// health: everything it depends on — the apiserver, the template, the run key —
-	// is either resolved at boot or per request.
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintln(w, "ok")
-	})
-
-	// SIGTERM is how a Deployment rolls. In-flight deliveries are drained rather
-	// than dropped: a create that was already sent to the apiserver is a run, and a
-	// delivery killed before it got there is one GitHub redelivers into the same
-	// swallowed AlreadyExists.
+	// SIGTERM is how a Deployment rolls, and draining is the whole point of the
+	// handshake below: a create already sent to the apiserver is a run, while a
+	// delivery cut off before it got there is a **lost** one — GitHub does not
+	// retry, it only marks the delivery failed and keeps it redeliverable by hand
+	// for three days, which needs a human to go looking.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Addr:    *addr,
+		Handler: orchestrator.Routes(h),
+		// The body timeouts the proxy deliberately omits — there, deadlines set on
+		// the connection survive the CONNECT hijack and would cut a transfer off
+		// mid-stream; here the handler is plain JSON and none of that applies.
+		// Without ReadTimeout the read deadline is cleared once the headers are
+		// parsed, so a body trickled a byte at a time holds a goroutine for as long
+		// as it likes — before the signature check, so from anything that can reach
+		// the Service.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	// Shutdown closes the listeners first, so ListenAndServe returns *immediately*
+	// and the in-flight handlers are still running: without waiting for this
+	// channel the process would exit through the middle of them, which is the
+	// opposite of draining. Bounded at 20s and not longer: the preStop sleep and
+	// this both spend the same terminationGracePeriodSeconds (5 + 20 against the
+	// default 30), and past it the kubelet's SIGKILL lands with nothing logged.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-ctx.Done()
-		if err := srv.Shutdown(context.Background()); err != nil {
+		sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(sctx); err != nil {
 			log.Printf("webhook: shutdown: %v", err)
 		}
 	}()
@@ -181,6 +201,7 @@ func serve(args []string) {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	<-done
 }
 
 // startRun is the whole of "turn a run into an object", and it is shared so that a

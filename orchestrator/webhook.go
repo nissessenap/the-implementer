@@ -3,10 +3,12 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v88/github"
 
@@ -49,10 +51,35 @@ type Webhook struct {
 	// place the command line makes it.
 	//
 	// Called synchronously, and the create is the only thing waited on: it is one
-	// apiserver round-trip, and its error is worth a 500 GitHub will redeliver.
-	// A goroutine here would trade that for a dropped run nobody is told about,
-	// which is the failure mode this whole system is built against.
+	// apiserver round-trip, and its error is worth a 500 — GitHub records the
+	// delivery as failed and it stays redeliverable by hand for three days.
+	// GitHub does **not** retry on its own, so a 500 here is a lost run unless a
+	// human notices a red delivery page; that is still strictly better than a
+	// goroutine, which would hide the same loss behind a 202.
 	Start func(context.Context, proxy.Run) error
+}
+
+// maxBody is the cap on a delivery, and it is the *only* one that does anything:
+// go-github's own limit is GitHub's 25MB payload ceiling, which this endpoint has
+// no use for — a real `issues` payload is tens of KB. The body is read in full
+// before the signature can be checked, so an unsigned POST costs this much memory
+// against the Deployment's 256Mi and its single replica.
+const maxBody = 1 << 20
+
+// Routes is the endpoint, mux included, so that the mux is a tested thing rather
+// than four lines in main() that no test ever reaches. A method pattern, so a GET
+// at /webhook is a 405 and not a signature failure that reads like a secret
+// mismatch.
+func Routes(h http.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("POST /webhook", http.MaxBytesHandler(h, maxBody))
+	// The readiness probe. "The listener is up" is the whole of this component's
+	// health: everything it depends on — the apiserver, the template, the run key —
+	// is either resolved at boot or per request.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	return mux
 }
 
 func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,8 +90,20 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The signature, over the raw body, in constant time — go-github's, because
 	// the one already in this binary is the one least likely to be subtly wrong.
+	// It accepts `X-Hub-Signature` (HMAC-SHA1) as well as the SHA-256 header, and
+	// that is left alone deliberately: SHA-1 HMAC is not broken, and pinning the
+	// header would also drop the form-encoded content type GitHub's webhook UI
+	// offers, which the same function handles for free.
 	body, err := github.ValidatePayload(r, h.Secret)
 	if err != nil {
+		// An oversize body arrives here too, and must not be reported as a
+		// signature failure: the one thing a 401 is for is a secret mismatch, and
+		// a payload cap is a misconfiguration a human has to be able to tell apart.
+		if errors.As(err, new(*http.MaxBytesError)) {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			log.Printf("webhook: oversize delivery %s", github.DeliveryID(r))
+			return
+		}
 		// 401 and a fixed string: what failed is a secret comparison, and the
 		// caller is not owed which half of it.
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
@@ -102,6 +141,22 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if e.Label.GetName() != readyLabel {
 		ignore(w, "label %q", e.Label.GetName())
+		return
+	}
+	// The same reasoning as the label guard, one field over: `issue` is required by
+	// the schema, so an absent one is GitHub sending something impossible — but
+	// `GetNumber()` answers 0 for it, `owner/repo#0` passes ParseIssue's numeric
+	// check, and the run would be a Job for an issue that cannot exist.
+	if e.GetIssue().GetNumber() <= 0 {
+		ignore(w, "no issue number")
+		return
+	}
+	// Closed issues, which the trigger contract did not mention and should have:
+	// labelling one is ordinary housekeeping, and a run is ~450s, ~$2, a branch and
+	// a pull request for work that is already done. Compared against "open" rather
+	// than against "closed" so that a state GitHub adds later ignores by default.
+	if s := e.GetIssue().GetState(); s != "open" {
+		ignore(w, "issue state %q", s)
 		return
 	}
 
@@ -157,7 +212,14 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 0004): redelivery, a second label and a restart mid-run all resolve to that
 	// one mechanism. Nothing here adds dedupe state, and nothing here may defeat it
 	// — which is why the delivery id is not part of anything.
-	if err := h.Start(r.Context(), run); err != nil {
+	// Detached from the request, and then bounded: GitHub gives up on the delivery
+	// at 10s, and on the request context the apiserver Create would be cancelled
+	// with it — losing the one thing this component exists to do, for a client that
+	// had already stopped listening. WithoutCancel alone would leave it unbounded,
+	// because the in-cluster rest.Config sets no timeout of its own.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	if err := h.Start(ctx, run); err != nil {
 		http.Error(w, "could not start the run", http.StatusInternalServerError)
 		log.Printf("webhook: starting %s: %v", run, err)
 		return

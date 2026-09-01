@@ -99,12 +99,23 @@ stage "what the front-end is not holding"
 # with no App id, no signer reference and no token mount, there is nothing in this
 # pod that could call the collaborator-permission endpoint or post a refusal
 # comment. The silence is the security property, so it is asserted as an absence.
-DEPLOY=$(kubectl -n "$NS" get "deploy/$ORCH" -o yaml)
-for forbidden in GITHUB_APP_ID GITHUB_APP_KEY GITHUB_TOKEN; do
-  grep -q "$forbidden" <<<"$DEPLOY" &&
-    { echo "!!! FAIL: the webhook front-end mounts $forbidden" >&2; exit 1; }
-done
-echo "PROBE no-credential    no App id, no signer reference, no GitHub token"
+# An allow-list and not a deny-list: greping for the three names a credential
+# *usually* arrives under passes an `envFrom: secretRef` or a volume called
+# something else, and what is being asserted is an absence. So the set of env
+# names is compared whole, and anything new has to be added here deliberately.
+ENVS=$(kubectl -n "$NS" get "deploy/$ORCH" \
+  -o jsonpath='{.spec.template.spec.containers[*].env[*].name}' | tr ' ' '\n' | sort | paste -sd,)
+# The five this install renders; TOOLCHAIN is a sixth when `toolchain` is set,
+# which it is not above.
+WANT=$(printf '%s\n' GITHUB_WEBHOOK_SECRET JOB_TEMPLATE_FILE POD_NAMESPACE PROXY_HOST RUN_KEY_FILE |
+  sort | paste -sd,)
+[[ $ENVS == "$WANT" ]] ||
+  { echo "!!! FAIL: the front-end's env is [$ENVS], want [$WANT]" >&2; exit 1; }
+# Nothing arriving whole from a Secret or ConfigMap either, which is the shape the
+# name check above cannot see.
+[[ $(kubectl -n "$NS" get "deploy/$ORCH" -o jsonpath='{.spec.template.spec.containers[*].envFrom}') == "" ]] ||
+  { echo "!!! FAIL: the front-end uses envFrom" >&2; exit 1; }
+echo "PROBE no-credential    env is exactly [$ENVS], and no envFrom"
 
 stage "forward to svc/$ORCH — a Service, not a public endpoint"
 kubectl -n "$NS" port-forward "svc/$ORCH" "$WEBHOOK_PORT:8080" >/dev/null 2>&1 &
@@ -224,10 +235,11 @@ want "$(deliver issues "$(payload labeled ready-for-agent a-maintainer User "$BA
 echo "PROBE signature        401, and no Job"
 
 stage "the refusals were silent, and nothing crashed"
-# restartCount, because the label-less payload is the one delivery that could have
-# panicked the process — and a panic would restart the container, answer nothing,
-# and be invisible in a Job count.
-RESTARTS=$(kubectl -n "$NS" get pod -l "app=$ORCH" -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
+# restartCount for a crash, and the log for a panic — they are different failures.
+# net/http recovers a handler panic, logs it and closes the connection, so the
+# process survives with restartCount 0: the label-less payload dereferencing nil
+# would show up only as "http: panic serving" below, which is why both are asserted.
+RESTARTS=$(kubectl -n "$NS" get pod -l "app=$ORCH,component=webhook" -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
 [[ ${RESTARTS// /} == 0 ]] || { echo "!!! FAIL: the front-end restarted ($RESTARTS)" >&2; exit 1; }
 echo
 echo "==> orchestrator log (every refusal is here and nowhere else):"
@@ -240,6 +252,7 @@ LOG=$(kubectl -n "$NS" logs "deploy/$ORCH")
 for who in 'some-app\[bot\]' ghost; do
   grep -q "$who" <<<"$LOG" || { echo "!!! FAIL: the log does not name the refused sender $who" >&2; exit 1; }
 done
+! grep -q "http: panic serving" <<<"$LOG" || { echo "!!! FAIL: a handler panicked" >&2; exit 1; }
 echo "PROBE silent-refusal   logged, never commented — and no restart"
 
 stage "clean up"

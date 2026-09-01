@@ -150,6 +150,13 @@ func TestIgnored(t *testing.T) {
 		// a red delivery page for something entirely correct.
 		{"a ping", "ping", `{"zen":"Non-blocking is better than blocking."}`},
 		{"another event type", "pull_request", payload("labeled", readyLabel, "a-maintainer", "User")},
+		// The two payload fields the handler reads off `issue`, both edited in place
+		// rather than through a parameter: what is asserted is a wire shape, and the
+		// literal above stays the one description of it.
+		{"a closed issue", "issues", strings.Replace(
+			payload("labeled", readyLabel, "a-maintainer", "User"), `"state": "open"`, `"state": "closed"`, 1)},
+		{"no issue number", "issues", strings.Replace(
+			payload("labeled", readyLabel, "a-maintainer", "User"), `"number": 73`, `"number": 0`, 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, started := recorder()
@@ -250,10 +257,11 @@ func TestNoSecretConfiguredRefusesEverything(t *testing.T) {
 	}
 }
 
-// A create that fails is a 500 GitHub will redeliver — deliberately not a swallowed
-// error behind a 202. A dropped run nobody is told about is the failure this whole
-// system is built against.
-func TestStartFailureIsRedeliverable(t *testing.T) {
+// A create that fails is a 500 — deliberately not a swallowed error behind a 202.
+// GitHub does not retry it; it marks the delivery failed and keeps it redeliverable
+// by hand for three days, so this is what makes the loss visible at all. A dropped
+// run nobody is told about is the failure this whole system is built against.
+func TestStartFailureIsNotSwallowed(t *testing.T) {
 	h, _ := recorder()
 	h.Start = func(context.Context, proxy.Run) error { return fmt.Errorf("apiserver said no") }
 	resp := deliver(t, h, "issues", payload("labeled", readyLabel, "a-maintainer", "User"))
@@ -262,5 +270,48 @@ func TestStartFailureIsRedeliverable(t *testing.T) {
 	}
 	if b, _ := io.ReadAll(resp.Body); strings.Contains(string(b), "apiserver said no") {
 		t.Errorf("the response repeats the internal error: %q", b)
+	}
+}
+
+// The mux, which every other test in this file skips by calling ServeHTTP directly
+// — so without this one a regression from the method pattern back to "/webhook"
+// (turning a GET into a 401 that reads like a secret mismatch), or a body cap that
+// does not cap, passes the whole suite and stage 95 as well.
+func TestRoutes(t *testing.T) {
+	h, _ := recorder()
+	srv := httptest.NewServer(Routes(h))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name, method, path string
+		body               io.Reader
+		want               int
+	}{
+		{"a GET at the webhook", http.MethodGet, "/webhook", nil, http.StatusMethodNotAllowed},
+		{"the readiness probe", http.MethodGet, "/healthz", nil, http.StatusOK},
+		// Unsigned, because the point is that the cap trips before the signature
+		// check does — and reports as a payload problem rather than a secret one.
+		{"an oversize body", http.MethodPost, "/webhook", strings.NewReader(strings.Repeat("x", maxBody+1)),
+			http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, srv.URL+tc.path, tc.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-GitHub-Event", "issues")
+			// ValidatePayload reads the content type before the body, so without
+			// this the oversize case fails on the media type and never reaches
+			// the cap — a green test asserting the wrong rejection.
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
 	}
 }

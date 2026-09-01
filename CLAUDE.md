@@ -105,7 +105,19 @@ Five things here are load-bearing, and three of them look like things to harden:
   and must be ignored rather than dereferenced; `GetLabel().GetName()` answering
   `""` is a coincidence and not a check.
 
-Idempotency adds nothing: redelivery, a second label and a restart all resolve to
+The **issue** is guarded the same way and for the same reason: a `labeled` delivery
+with `number` 0 would pass `ParseIssue`, and a closed issue is ordinary housekeeping
+that would otherwise spend ~450s and ~$2 on work already done. The state is compared
+against `"open"` and not against `"closed"`, so a state GitHub adds later ignores.
+
+**GitHub does not redeliver on its own.** A failed delivery is marked failed and
+stays redeliverable by hand for three days, so a 500 here is a lost run unless a
+human looks — which is why the drain, the body cap and the detached create context
+are not cosmetic, and why `exists` logs the existing Job's phase (a re-label of a
+run the TTL still holds creates nothing, and the delivery page nobody reads is the
+only other place that could say so).
+
+Idempotency adds nothing: a redelivery, a second label and a restart all resolve to
 the Job name plus a swallowed `AlreadyExists`. Nothing here may key on the delivery
 id, which would defeat it. The **edit-after-label window** is #32 and deliberately
 open — authorization happens here, the pod fetches the issue text at run time, and
