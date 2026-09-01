@@ -52,10 +52,66 @@ GitHub ──webhook──► front-end ──create Job──► apiserver
 
 ### The two halves
 
-**The front-end** handles `issues`/`labeled` webhooks ([`palantir/go-githubapp`][pkgs]),
-performs [ADR 0003][adr3]'s toolchain detection with 1–2 REST calls, and creates
-one Job. Then it is done — it does not wait, block, or hand anything to a
-worker. The HTTP response is sent before the run finishes.
+**The front-end** handles `issues`/`labeled` webhooks, performs [ADR 0003][adr3]'s
+toolchain detection with 1–2 REST calls, and creates one Job. Then it is done — it
+does not wait, block, or hand anything to a worker. The HTTP response is sent before
+the run finishes.
+
+**Amended 2026-09-01, when the front-end was built: detection is not in it yet, and
+that is why it holds no credential.** The sentence above says the front-end performs
+[ADR 0003][adr3]'s toolchain detection with 1–2 REST calls, and it will — but those
+calls are the *first* thing that puts a GitHub credential in this half of the
+process, and nothing else about the trigger needs one. So detection landed as its own
+ticket, the front-end shipped with the toolchain as one configured value for the
+installation, and "holds no GitHub credential at all" below is a true statement about
+today rather than a design constraint on detection. When detection lands the
+credential arrives with it, and the silent refusal below stops being structural and
+starts being a rule the code has to keep.
+
+**Amended 2026-09-01: not with [`palantir/go-githubapp`][pkgs].** This ADR named it, and the trigger ticket
+repeated the instruction; both were written before [ADR 0005][adr5] existed. The
+library's dispatcher is `github.ValidatePayload` plus a map lookup on the event type,
+and `go-github` is already a direct dependency — while the half that would earn the
+dependency, its `ClientCreator`, builds `ghinstallation` transports from the App's
+private key **as PEM bytes**, which is precisely the thing [ADR 0005][adr5]'s signing
+seam exists to keep out of both processes. It also pins `go-github` **v90** against
+this repo's v88, so adopting it costs two majors of one library plus `zerolog` and
+`go-metrics` to replace one function call with one that fits worse. Nothing else
+about the front-end changes; the authorization below is unaffected either way.
+
+**Authorization is two clauses on the payload, and there is no permission API
+call.** `sender.type != "User"`, and `sender.login != "ghost"` beside it because
+GitHub substitutes that account for unresolvable actors and its type *is* `User`.
+The flatt.tech disclosure is usually cited as proof a write-access check is
+mandatory; it says the opposite — `claude-code-action` **had** one and was bypassed
+anyway, because it opened by returning true for any actor whose login ended in
+`[bot]`, and that attack needs no access to the target repository at all: create a
+GitHub App, install it on your own repository, use its installation token against
+the target. The fix was to assert the actor's type. So the clause usually omitted is
+the one that was exploited, and the clause usually insisted on is the one that
+failed to help. Applying a label needs Triage, not write, so the event proves triage
+and nothing more — and the escalation ceiling is a branch plus a pull request **no
+component in this system can merge**. It also deletes an unverifiable dependency:
+which fine-grained permission the collaborator-permission endpoint requires could
+not be established, because GitHub's public OpenAPI encodes none for it.
+
+**The refusal is silent, deliberately.** The bot/ghost path logs and does nothing
+else. On a public repository a "sorry, you're not allowed" comment would hand an
+unauthorized actor an on-demand way to make the App write to issues — the
+`issues: write` plus untrusted-input combination the same disclosure flags. So the
+front-end holds no GitHub credential at all and there is nothing there to write
+with. What it does not cover is the **edit-after-label window**: authorization
+happens at webhook time and the pod fetches the issue text at run time, so the text
+is mutable in between by someone never authorized. That is [#32][editwindow], it
+survives both clauses because neither looks at the text, and it is deliberately
+open.
+
+One payload detail is load-bearing. `label` is **not** in the `issues` payload's
+required set — that is `[action, issue, repository, sender]`, against the published
+schema — so a `labeled` delivery can arrive with no label object and must be ignored
+rather than dereferenced. Everything ignored answers **200**: a non-2xx marks the
+delivery failed on the App's own page and invites GitHub to redeliver an event that
+will be ignored again.
 
 **The informer** watches **Pods**, not Jobs. This is not a stylistic choice: both
 result channels are pod-level. The compact result is
@@ -306,3 +362,4 @@ component entirely. **The orchestrator creates exactly one object per run.**
 [observability]: https://github.com/nissessenap/the-implementer/issues/17
 [concurrency]: https://github.com/nissessenap/the-implementer/issues/23
 [pkgs]: https://github.com/palantir/go-githubapp
+[editwindow]: https://github.com/nissessenap/the-implementer/issues/32

@@ -92,7 +92,7 @@ wiring — base URL, path rewrite, a credential arriving on a request that carri
 none, and SSE deltas arriving spread out rather than in one buffered lump. ADR
 0005 says why it is a mock, and the refusals are `go test ./proxy`'s.
 
-The **orchestrator** stage is the last one, and it is the only one whose Job no
+The **orchestrator** stage is the only one whose Job no
 fixture describes: the binary builds it, `charts/orchestrator` renders its PodSpec,
 and the pod reaches the proxy with a credential the builder derived and nothing of
 its own. It asks the apiserver the two questions no amount of reasoning about
@@ -101,6 +101,15 @@ something it accepts, and that two repository names differing only in a
 normalisation the slug flattens get *different* Jobs. Its clone half needs no
 credential; its push half runs when stage 50 or 60 has left one in the proxy.
 
+The **trigger** stage is the last one, and the only one that plays GitHub rather
+than talking to it: it signs an `issues`/`labeled` payload with the secret it put in
+the cluster and POSTs it at the orchestrator's **Service** through a port-forward, so
+there is no public endpoint and no tunnel and it runs unattended. One delivery
+becomes a run; a redelivery, a second label, some other label, a `labeled` event with
+no label object at all, a bot sender, `ghost`, and a wrong signature become nothing —
+each asserted by the absence of a Job, and each on its own issue number so a shared
+one cannot hide a miss.
+
 What they prove — both credential shapes, git's 401 round-trip, the mint's scope,
 cache and refresh, the GAR attach and the model route's rewrite and streaming — is
 covered offline by `go test ./proxy`.
@@ -108,7 +117,7 @@ Adding a stage is adding a file to [`e2e/`](e2e/).
 
 ## Roadmap
 
-- [ ] Trigger implementation based on a label
+- [x] Trigger implementation based on a label
 - [ ] Trigger implementation based on a mention + extra context in an issue comment
 - [ ] Trigger feedback on a review using a comment in a PR — deliberately deferred
 

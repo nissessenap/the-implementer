@@ -56,6 +56,61 @@ docker run --rm --tmpfs /workspace --tmpfs /tmp --tmpfs /home/agent \
 Both need a repository whose `implementer/` branch prefix you are happy to have
 pushed to. Expect ~450s and ~$2 for three phases against a small repo.
 
+### The orchestrator's webhook front-end
+
+`orchestrator serve` is ADR 0004's other half and the trigger the system exists
+for: a signed `issues` webhook arrives, one Job is created, and the handler is
+**done** — it does not wait for the run, and the response is sent minutes before
+the pull request exists. `charts/orchestrator` renders its Deployment and Service
+whenever `image` is set; empty leaves the chart as the Job template, the
+ServiceAccount and the Role, which is what `run` and `watch` need.
+
+```sh
+POD_NAMESPACE=… PROXY_HOST=… RUN_KEY_FILE=… JOB_TEMPLATE_FILE=… \
+  GITHUB_WEBHOOK_SECRET=… orchestrator serve   # POST /webhook, GET /healthz
+make orchestrator-image                        # the reference the chart's `image` takes
+./e2e/95-webhook.sh                            # a signed POST at the Service, no tunnel
+```
+
+Five things here are load-bearing, and three of them look like things to harden:
+
+- **The label is a constant, not a value.** `ready-for-agent`, the one `/triage`
+  produces. #73 defers configurability to "per installation later" — and an
+  installation is a GitHub App installation, so what eventually reads it is a
+  per-installation lookup, not an env var on a Deployment. Shipping the env var first
+  would be neither, and would need keeping alive while the real thing replaced it.
+- **`palantir/go-githubapp` is deliberately not used**, against the ticket's
+  wording. Its dispatcher *is* `github.ValidatePayload` plus a map lookup, and
+  go-github is already a dependency — while the half that would earn the dependency,
+  its `ClientCreator`, wants the App's private key as PEM bytes, which ADR 0005's
+  signing seam exists to make impossible here. It also pins go-github **v90**
+  against this repo's v88. So it would cost two majors of one library, `zerolog` and
+  `go-metrics` to replace one function call with a worse-fitting one.
+- **The authorization is two clauses on the payload and no permission API call.**
+  `sender.type != "User" || sender.login == "ghost"` → ignore. The flatt.tech
+  disclosure is usually read as proof a write check is mandatory; it says the
+  opposite — `claude-code-action` **had** one and was bypassed, because it returned
+  true for any login ending in `[bot]`, and the attack needs no access to the target
+  repository at all. The fix was the type assertion. `ghost` is beside it because
+  GitHub substitutes that account for unresolvable actors and **its type is
+  `User`**. `make test` asserts the absence with a `grep`, because "there is no call
+  to the collaborator-permission endpoint" is the criterion.
+- **The refusal is silent, and that is the security property.** A "sorry, you're
+  not allowed" comment on a public repository hands an unauthorized actor an
+  on-demand way to make the App write to issues. So the front-end holds **no GitHub
+  credential of any kind** — there is nothing there to write with, and stage 95
+  asserts the Deployment mounts none.
+- **`label` is not in the payload's required set** — that is `[action, issue,
+  repository, sender]`. A `labeled` delivery with no label object is a real shape
+  and must be ignored rather than dereferenced; `GetLabel().GetName()` answering
+  `""` is a coincidence and not a check.
+
+Idempotency adds nothing: redelivery, a second label and a restart all resolve to
+the Job name plus a swallowed `AlreadyExists`. Nothing here may key on the delivery
+id, which would defeat it. The **edit-after-label window** is #32 and deliberately
+open — authorization happens here, the pod fetches the issue text at run time, and
+neither clause above looks at the text.
+
 ### The orchestrator's informer
 
 `orchestrator watch` is ADR 0004's informer half. It watches the Jobs in its
@@ -190,6 +245,15 @@ Stage 70, the model route, needs no credentials and never skips: it runs against
 not replace it with a stage that mounts a Google credential — the reason is GAR's
 above, spelled out in ADR 0005, and what the mock cannot prove is pinned by
 `proxy/vertex_test.go`.
+
+Stage 95, the trigger, needs no credentials and never skips: the front-end makes
+no API call at all, so the payload is the whole of the input and the stage signs its
+own. The delivery is a POST at the **Service** through a port-forward rather than a
+public endpoint, which is what makes it runnable unattended — the alternative is
+ngrok, a real App, and a stage that only ever passes on a laptop. Each ignored case
+uses its own issue number, because sharing one would make "still exactly one Job"
+true whether the case was ignored or wrongly started a run for an issue that already
+had one.
 
 Stage 90, the informer, needs no credentials and never skips either: GitHub is a
 **mock** behind the `GITHUB_API_URL` seam, and the App JWT is signed by ghait's
