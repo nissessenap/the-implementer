@@ -67,7 +67,7 @@ func run(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	dry := fs.Bool("dry-run", false, "send the Job to the apiserver for validation only — it answers whether the derived name is accepted, which is the one question no amount of reasoning about DNS-1123 settles")
 	toolchain := fs.String("toolchain", os.Getenv("TOOLCHAIN"), "ADR 0003's answer for this repository; unset is legal and means the review phase runs with no language subagent")
-	docker := fs.Bool("docker", false, "wrap the run plan in rootlesskit so the sandbox has a container runtime — only the go image carries one, it costs the run its uid-1000 posture inside the namespace and the two securityContext fields Pod Security Standards `restricted` forbids, and it is off by default")
+	docker := fs.Bool("docker", false, "wrap the run plan in rootlesskit so the sandbox has a container runtime — only the go image carries one, it costs the run its uid-1000 posture inside the namespace and the two securityContext fields Pod Security Standards 'restricted' forbids, and it is off by default")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		usage()

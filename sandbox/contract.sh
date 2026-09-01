@@ -89,13 +89,28 @@ leaked=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$I
 case $TOOLCHAIN in
   '') ;;
   go)
-    say go "go version | cut -d' ' -f3"
+    # `go env` and not `go version | cut`: a pipeline's status is the *last*
+    # command's, so a missing toolchain would leave `cut` reporting success and
+    # print `ok go` with an empty version — the vacuous pass `say` above exists to
+    # prevent, walked back in through the pipe.
+    say go "go env GOVERSION"
     # `auto`, so a repository whose go.mod asks for a version this image does not
     # carry downloads it and completes. `local` would make that a hard failure,
     # and the failure would look like the repository's fault.
-    gt=$(in_image 'echo ${GOTOOLCHAIN:-auto}') || gt='<unreadable>' 
-    [ "$gt" != local ] && ok "GOTOOLCHAIN=$gt, so a version this image lacks is downloaded, not refused" ||
+    #
+    # Read with `go env` and not `echo $GOTOOLCHAIN`: the variable is only one of
+    # the places the setting comes from, so a pin written with `go env -w` — which
+    # lands in $GOROOT/go.env — would be invisible to an echo and pass the one
+    # check this line exists to fail. Unreadable is a FAIL rather than a default,
+    # for the same reason `say` takes the status: a fallback value here would let
+    # an image with no toolchain at all print an `ok` about its toolchain.
+    if ! gt=$(in_image 'go env GOTOOLCHAIN'); then
+      fail "GOTOOLCHAIN is unreadable: \`go env\` does not run in this image"
+    elif [ "$gt" = local ]; then
       fail "GOTOOLCHAIN=local turns a version mismatch into a failed run"
+    else
+      ok "GOTOOLCHAIN=$gt, so a version this image lacks is downloaded, not refused"
+    fi
     # The container runtime, which only this image carries. Presence only — that
     # it *works* needs gVisor and a cluster, which is e2e/85's job.
     stack=yes
@@ -120,7 +135,7 @@ case $TOOLCHAIN in
     ;;
   python)
     say python "python3 --version"
-    say pip "pip --version | cut -d' ' -f1-2"
+    say pip "pip --version"   # unpiped, for the reason spelled out under `say go`
     # PEP 668's marker, removed deliberately: this filesystem is read-only at run
     # time and the container is ephemeral, so refusing an install outside a venv
     # only fails the run.

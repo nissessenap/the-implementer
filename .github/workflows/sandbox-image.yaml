@@ -17,9 +17,6 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/implementer-base
-
 jobs:
   image:
     runs-on: ubuntu-24.04
@@ -37,33 +34,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          # Exactly these two, and no `latest`: the action's default flavor is
-          # `latest=auto`, which would publish a third, floating tag on an image
-          # whose whole posture is digest-pinning.
-          flavor: latest=false
-          # The immutable reference and the moving major, from the tag itself. A
-          # workflow_dispatch or a pull request gets neither and builds unpushed.
-          tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: sandbox
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      # The three language images, from the base above. `docker build` rather than
-      # the action: the local tag the derivatives need is not one that may ever be
-      # pushed, and the whole of the tagging logic below is two shell parameter
-      # expansions against the git tag. The base rebuild here is a full cache hit —
-      # same daemon, same buildkit, same context.
-      - name: the language images
+      # One build of the base, and the three derivatives `FROM` that exact image.
+      # `docker build` throughout, and build-push-action for none of it: that action
+      # pushes what it builds, so the local tag the derivatives need would have to
+      # come from a *second* build of the same context — and nothing enforces that
+      # the second one is the first one. A cache miss there (another buildx driver,
+      # an evicted cache, a `apt-get update` layer that busts) publishes
+      # implementer-go:v1.2.3 derived from a base nobody can pull, while the
+      # summary prints the other base's digest. Build once, tag from it, push tags.
+      #
+      # Publishing is a separate step below rather than a `push:` flag here, because
+      # a pull request builds all four and pushes none of them.
+      - name: the images
         run: |
           set -eu
           docker build -q -t implementer-base:ci sandbox
@@ -79,22 +61,22 @@ jobs:
           sandbox/contract.sh implementer-base:ci
           for l in go node python; do sandbox/contract.sh "implementer-$l:ci" "$l"; done
 
-      # Published under the same tags as the base and from the same run, so a
-      # `sandbox.images` map is one version across all three. The digest each push
+      # All four under the same two tags and from the same run, so a
+      # `sandbox.images` map is one version across the set. The digest each push
       # prints is the one Helm should pin: `docker push` reports the digest of what
       # it actually stored, which `docker inspect` cannot when two tags share it.
       #
-      # The moving major is skipped for a prerelease, and that is not tidiness:
-      # metadata-action's `{{major}}` emits nothing for one, so pushing `:v2` here
-      # unconditionally would leave `implementer-go:v2` on a release candidate
-      # while `implementer-base:v2` still resolved to the last stable — the exact
-      # matched set this whole job exists to keep.
-      - name: publish the language images
+      # No `latest`, deliberately: a floating third tag on an image whose whole
+      # posture is digest-pinning. The moving major is skipped for a prerelease, and
+      # that is not tidiness either — pushing `:v2` for a release candidate would
+      # leave `:v2` resolving to one, which is the matched set this job exists to
+      # keep pointed at something a human meant to ship.
+      - name: publish
         if: github.event_name == 'push'
         run: |
           set -eu
           v=${GITHUB_REF_NAME#v}
-          for l in go node python; do
+          for l in base go node python; do
             img=ghcr.io/${{ github.repository_owner }}/implementer-$l
             case $v in
               *-*) ;;
@@ -105,9 +87,3 @@ jobs:
             d=$(docker push "$img:v$v" | awk '/digest: /{print $3}')
             echo "$img@$d" >> "$GITHUB_STEP_SUMMARY"
           done
-      # The one line an operator needs: `sandbox.image` in charts/orchestrator.
-      # Gated on the same event as the push above: a pull-request build produces a
-      # digest too, and printing one for an image nobody can pull is worse than
-      # printing nothing.
-      - if: github.event_name == 'push'
-        run: echo "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

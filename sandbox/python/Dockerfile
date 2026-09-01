@@ -24,4 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # not the installers a repository's own tooling shells out to.
 RUN rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 
+# The other half of that decision. With /usr read-only at run time pip falls back
+# to a user install, so a repository's console scripts land in ~/.local/bin — and
+# without this the agent installs a tool it then cannot invoke. The path is fixed
+# rather than derived: the chart sets HOME and the base's passwd entry agrees.
+ENV PATH=/home/agent/.local/bin:$PATH
+
 USER 1000

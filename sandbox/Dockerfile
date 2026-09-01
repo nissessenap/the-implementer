@@ -22,6 +22,13 @@
 # correct beats native and broken, and `make sandbox-image` is a documented path.
 FROM --platform=linux/amd64 debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
+# Static, and the reason it is not metadata-action's: the workflow builds every
+# image with plain `docker build` so the derivatives come from the base it just
+# built, which leaves nowhere for the action's generated labels to be applied.
+# This is the one that earns its keep — ghcr links a package to its repository by
+# it — and children inherit it, so all four are linked from one line.
+LABEL org.opencontainers.image.source=https://github.com/nissessenap/the-implementer
+
 # ca-certificates puts the system bundle at /etc/ssl/certs/ca-certificates.crt,
 # which the phase script concatenates the proxy's CA onto. jq is the run plan's
 # only string escaper and its only JSON reader. No node, no npm, no sudo, no tar
@@ -62,9 +69,15 @@ RUN git clone -q https://github.com/mattpocock/skills /opt/skills \
  && git -C /opt/ponytail checkout -q 16f29800fd2681bdf24f3eb4ccffe38be3baec6b \
  && rm -rf /opt/skills/.git /opt/ponytail/.git
 
-# ponytail's plugin.json declares three node hooks. ADR 0001 bakes no node, so they
-# fail 127 on every phase, are surfaced in the stream, and are not fatal — the
+# ponytail's plugin.json declares three node hooks. This image bakes no node, so
+# they fail 127 on every phase, are surfaced in the stream, and are not fatal — the
 # plugin is baked for its skills, not its hooks (#43).
+#
+# ⚠️ That is a fact about *this* image, not about the plugin. The `node` derivative
+# carries node, so there the three hooks run: ponytail-activate.js writes a flag
+# file and injects the ruleset as hidden SessionStart context, which #43's premise
+# was measured without. A ponytail phase on the node image is therefore not the
+# phase measured here, and nobody has measured that one.
 #
 # The plugin *names*, which is the half of the invocation string preflight cannot
 # check: `/<plugin name>:<skill directory>` — the directories it verifies itself on
