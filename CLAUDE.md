@@ -89,6 +89,20 @@ Three things about it are load-bearing and easy to "simplify" back out:
 `GITHUB_API_URL` is the seam, handed to both clients — ghait's mint path and the
 orchestrator's own calls — and it is what stage 90 points at a mock.
 
+### The Kubernetes versions this targets
+
+**1.35–1.37**, which is what upstream supports as of 2026-09-01, and it moves: a
+version leaves this window roughly every four months. Scope to what those releases
+have and nothing older. Concretely, that means no compatibility branch for a
+behaviour a supported release does not exhibit — the pod carries
+`batch.kubernetes.io/job-name` (`batchv1.JobNameLabel`, GA since 1.27), so the
+informer reads that and not the unprefixed legacy label, and the Job controller
+defers the terminal condition until its pods are terminal (1.31), which is what
+makes stage 90's "the pod is gone" assertion reliable rather than a race.
+
+A feature younger than 1.35 is fair game. A workaround for one older than it is
+dead code that nobody will ever delete, because nobody can prove it is unreachable.
+
 ### Running the credentialed e2e stages
 
 Stage 50 needs a real GitHub token. `gh auth token` prints the logged-in one, so

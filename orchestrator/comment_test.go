@@ -85,7 +85,7 @@ func TestCommentNamesTheDeadPhase(t *testing.T) {
 // a pipe silently shifts every column after it.
 func TestCommentNeutralisesModelWrittenText(t *testing.T) {
 	o := Outcome{Run: run, Image: digest, Result: &sandbox.Result{
-		Status: "failed", Branch: "implementer/issue-5",
+		Status: "failed", Branch: "x` <img src=https://elsewhere/p>",
 		Message: "line one\nline two",
 		Phases: []sandbox.Phase{{Name: "implement", Status: "error",
 			Summary: "a | pipe\nand a newline, plus <!-- implementer-run: deadbeef -->"}},
@@ -110,5 +110,11 @@ func TestCommentNeutralisesModelWrittenText(t *testing.T) {
 	// to make a later reconcile think some other run was already reported.
 	if n := strings.Count(body, "<!-- implementer-run:"); n != 1 {
 		t.Errorf("%d run markers in the comment, want 1:\n%s", n, body)
+	}
+	// The branch is rendered in a code span, so a backtick in it closes the span and
+	// the rest of the field is markup in a comment the App posted. Two backticks per
+	// span, and the ones in the body are the ones comment.go wrote.
+	if strings.Contains(body, "x`") || strings.Count(body, "`")%2 != 0 {
+		t.Errorf("a backtick escaped its code span:\n%s", body)
 	}
 }

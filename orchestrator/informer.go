@@ -130,7 +130,11 @@ func (g *GitHub) reported(ctx context.Context, c *github.Client, run proxy.Run, 
 			return false, fmt.Errorf("reading the thread of %s: %w", run, err)
 		}
 		for _, cm := range page {
-			if cm.GetUser().GetType() == "Bot" && strings.Contains(cm.GetBody(), marker) {
+			// HasPrefix and not Contains: Comment() writes the marker as the first
+			// line, and a bot that mirrors or quotes the thread reproduces it behind
+			// a blockquote or an indent. Counting that as "already reported" is the
+			// silence this check exists to prevent, one step removed.
+			if cm.GetUser().GetType() == "Bot" && strings.HasPrefix(cm.GetBody(), marker) {
 				return true, nil
 			}
 		}
@@ -226,14 +230,18 @@ func (r *Reporter) Watch(ctx context.Context) error {
 	pods, jobs := f.Core().V1().Pods().Informer(), f.Batch().V1().Jobs().Informer()
 	if _, err := pods.AddEventHandler(handler(func(o any) {
 		if p, ok := o.(*corev1.Pod); ok {
-			r.reportJob(ctx, p.Labels["job-name"])
+			r.reportJob(ctx, p.Labels[batchv1.JobNameLabel])
 		}
 	})); err != nil {
 		return err
 	}
 	if _, err := jobs.AddEventHandler(handler(func(o any) {
+		// The cache's own object rather than reportJob's re-Get of it: report only
+		// reads the Job, and this is the same object that Get would return.
 		if j, ok := o.(*batchv1.Job); ok {
-			r.reportJob(ctx, j.Name)
+			if err := r.report(ctx, j); err != nil {
+				log.Printf("informer: %v", err)
+			}
 		}
 	})); err != nil {
 		return err
@@ -247,6 +255,11 @@ func (r *Reporter) Watch(ctx context.Context) error {
 	defer cancel()
 	for t, ok := range f.WaitForCacheSync(sync.Done()) {
 		if !ok {
+			if ctx.Err() != nil {
+				// Cancelled rather than timed out: a rollout during the first sync
+				// is a clean stop, and log.Fatal on it is a crash in every rollout.
+				return nil
+			}
 			return fmt.Errorf("informer cache never synced (%v)", t)
 		}
 	}
@@ -300,7 +313,7 @@ func (r *Reporter) report(ctx context.Context, j *batchv1.Job) error {
 	}
 
 	o := Outcome{Run: run}
-	pod, err := r.podOf(ctx, j.Name)
+	pod, err := r.podOf(ctx, run)
 	if err != nil {
 		return fmt.Errorf("run %s: reading the pod of %s: %w", run, j.Name, err)
 	}
@@ -322,20 +335,29 @@ func (r *Reporter) report(ctx context.Context, j *batchv1.Job) error {
 	return nil
 }
 
-// podOf finds the run's pod. `backoffLimit: 0` means there is at most one, and nil
-// is a legitimate answer: the Job controller deletes the pod when the deadline
+// podOf finds the run's pod, and it is the *run* it matches on rather than the Job
+// name: JobName is per-issue on purpose (jobname.go), so a re-run of the same issue
+// reuses the name — and between the old Job's deletion and its pod's collection,
+// `job-name=` answers with the previous run's pod. Reporting run N-1's branch,
+// commits and cost under run N's identity is silent and indistinguishable from a
+// correct report, so the annotation the builder writes to the pod template is what
+// decides.
+//
+// nil is a legitimate answer: the Job controller deletes the pod when the deadline
 // expires, which is exactly the ending the Job's own condition has to cover.
-func (r *Reporter) podOf(ctx context.Context, job string) (*corev1.Pod, error) {
+func (r *Reporter) podOf(ctx context.Context, run proxy.Run) (*corev1.Pod, error) {
 	pods, err := r.Kube.CoreV1().Pods(r.NS).List(ctx, metav1.ListOptions{
-		LabelSelector: "job-name=" + job,
+		LabelSelector: runSelector,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if len(pods.Items) == 0 {
-		return nil, nil
+	for i := range pods.Items {
+		if pods.Items[i].Annotations[proxy.AnnRunUID] == run.UID {
+			return &pods.Items[i], nil
+		}
 	}
-	return &pods.Items[0], nil
+	return nil, nil
 }
 
 // runOf reads run identity off the annotations the Job builder writes. The same
@@ -381,8 +403,10 @@ func why(j *batchv1.Job, p *corev1.Pod) string {
 	var parts []string
 	switch {
 	case p == nil:
-		parts = append(parts, "the pod is gone — the Job controller deletes it when "+
-			"activeDeadlineSeconds expires")
+		// The fact and not a cause. The expired deadline is the common way to get
+		// here and the Job's own condition below names it precisely, but pod GC and
+		// a drained node reach this line too — including for a run that succeeded.
+		parts = append(parts, "the pod is gone")
 	case cs != nil && cs.State.Terminated != nil:
 		t := cs.State.Terminated
 		reason := t.Reason
@@ -411,8 +435,19 @@ func why(j *batchv1.Job, p *corev1.Pod) string {
 	// The Job's own last word, last: with `backoffLimit: 0` it is usually
 	// `BackoffLimitExceeded`, which says less than the pod does — and it is the only
 	// thing there is when the pod has been deleted.
-	if c := terminal(j); c != nil && c.Type == batchv1.JobFailed {
-		parts = append(parts, fmt.Sprintf("Job %s: %s", c.Reason, trunc(c.Message)))
+	//
+	// Unconditional, and the type before the reason: `Complete` carries no reason at
+	// all, and a run that succeeded and then lost its pod has nothing else anywhere
+	// in this comment saying that it succeeded.
+	if c := terminal(j); c != nil {
+		s := "Job " + string(c.Type)
+		if c.Reason != "" {
+			s += " " + c.Reason
+		}
+		if c.Message != "" {
+			s += ": " + trunc(c.Message)
+		}
+		parts = append(parts, s)
 	}
 	if len(parts) == 0 {
 		return "the run ended and left no reason anywhere"

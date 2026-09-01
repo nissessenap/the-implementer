@@ -55,9 +55,9 @@ func (o Outcome) Comment() string {
 		// The silent death, said plainly. Nothing here is invented: no branch, no
 		// cost, no phases, because none of that was ever written.
 		fmt.Fprintf(&b, "### the run ended without writing a result\n\n**%s**\n\n", cell(o.Reason))
-		b.WriteString("Nothing in the pod ran to report this — no trap fired and no phase " +
-			"script executed — so the line above is all the information that exists. The " +
-			"transcript, if the pod is still there, is in `kubectl logs`.\n")
+		b.WriteString("The line above is all the information that exists — this is built " +
+			"from Kubernetes, because the run plan wrote no result. The transcript, if the " +
+			"pod is still there, is in `kubectl logs`.\n")
 		o.footer(&b)
 		return b.String()
 	}
@@ -95,7 +95,10 @@ func (o Outcome) Comment() string {
 func (o Outcome) footer(b *strings.Builder) {
 	img := o.Image
 	if img == "" {
-		img = "never resolved — the image did not pull"
+		// Not "the image did not pull": there is no pod to read the digest off on
+		// every ending that deleted one, and a real pull failure is already in the
+		// line above, verbatim, from the container's waiting state.
+		img = "unresolved"
 	}
 	fmt.Fprintf(b, "\n<sub>run `%s` · image `%s`</sub>\n", cell(o.Run.UID), cell(img))
 }
@@ -103,13 +106,16 @@ func (o Outcome) footer(b *strings.Builder) {
 // cell makes one field of the blob safe to put in the comment. Every free-text
 // field in it is a model's, written from an issue thread a stranger can edit, so
 // this is a trust boundary and not tidying: a newline in a summary ends the table
-// it is rendered in, and a pipe silently shifts every column after it.
+// it is rendered in, a pipe silently shifts every column after it, and a backtick
+// closes the code span the branch, image and uid are rendered in — which turns the
+// rest of a model's field into markup in a comment posted by the App.
 //
 // The marker is neutralised for the same reason — a summary that could contain a
 // comment marker could make a later reconcile believe some other run was already
 // reported, and a run reported by a string in somebody else's summary is a run
 // nobody hears about.
 func cell(s string) string {
-	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ", "|", "\\|", "<!--", "<! --").Replace(s)
+	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ", "|", "\\|", "<!--", "<! --",
+		"`", "'").Replace(s)
 	return strings.TrimSpace(s)
 }

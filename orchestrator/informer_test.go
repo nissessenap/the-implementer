@@ -134,7 +134,11 @@ func pod(phase corev1.PodPhase, cs corev1.ContainerStatus) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "acme-widgets-5-1a2b3c4d-abcde", Namespace: "ns",
-			Labels: map[string]string{"app": "implementer", "job-name": "acme-widgets-5-1a2b3c4d"},
+			Labels: map[string]string{"app": "implementer", batchv1.JobNameLabel: "acme-widgets-5-1a2b3c4d"},
+			Annotations: map[string]string{
+				proxy.AnnOwner: run.Owner, proxy.AnnRepo: run.Repo,
+				proxy.AnnIssue: run.Issue, proxy.AnnRunUID: run.UID,
+			},
 		},
 		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}},
 		Status: corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{cs}},
@@ -314,5 +318,70 @@ func TestTheWholeThreadIsRead(t *testing.T) {
 	}
 	if posted, _ := f.snapshot(); len(posted) != 1 {
 		t.Fatalf("%d comments, want 1 — the marker was past the first page", len(posted))
+	}
+}
+
+// The Job name is per-issue on purpose (jobname.go), so a re-run of the same issue
+// reuses it — and until the previous run's pod is collected, the Job's own name
+// answers with it. Reporting run N-1's branch, commits and cost under run N's uid
+// is silent and indistinguishable from a correct report, so identity is the run
+// annotation rather than the name.
+func TestAPreviousRunsPodIsNotThisRunsResult(t *testing.T) {
+	f := newFakeIssues(t)
+	stale := blobPod("completed")
+	stale.Name = "acme-widgets-5-1a2b3c4d-stale"
+	stale.Annotations[proxy.AnnRunUID] = "0f0f0f0f"
+
+	r := reporter(t, f, job(batchv1.JobFailed, "DeadlineExceeded",
+		"Job was active longer than the specified deadline"), stale)
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	posted, _ := f.snapshot()
+	if len(posted) != 1 {
+		t.Fatalf("%d comments posted, want 1", len(posted))
+	}
+	for _, absent := range []string{"implementer/issue-5", "$2.13", digest} {
+		if strings.Contains(posted[0], absent) {
+			t.Errorf("the report carries %q off the previous run's pod:\n%s", absent, posted[0])
+		}
+	}
+	if !strings.Contains(posted[0], "the pod is gone") {
+		t.Errorf("the body does not say the pod is gone:\n%s", posted[0])
+	}
+}
+
+// A run that succeeded and then lost its pod — GC, a drained node — has nothing but
+// the Job left. "the pod is gone" on its own reads as a failure, so the Job's
+// condition is named whatever it is rather than only when it failed.
+func TestAGonePodStillNamesASucceededJob(t *testing.T) {
+	f := newFakeIssues(t)
+	r := reporter(t, f, job(batchv1.JobComplete, "", ""))
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	posted, _ := f.snapshot()
+	if len(posted) != 1 {
+		t.Fatalf("%d comments posted, want 1", len(posted))
+	}
+	if !strings.Contains(posted[0], "Job Complete") {
+		t.Errorf("the body does not name the Job's condition:\n%s", posted[0])
+	}
+}
+
+// The other half of the stranger's marker: a bot that mirrors or summarises the
+// thread quotes the App's own comment back into it, marker and all. Comment()
+// writes the marker as the first line, and only there does it count.
+func TestAQuotedMarkerDoesNotSilenceTheRun(t *testing.T) {
+	f := newFakeIssues(t)
+	f.seed("Mirrored from elsewhere:\n\n> "+Marker(run.UID)+"\n> ### completed", "Bot")
+	r := reporter(t, f, job(batchv1.JobComplete, "", ""), blobPod("completed"))
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posted, _ := f.snapshot(); len(posted) != 1 {
+		t.Fatalf("%d comments posted, want 1 — a quoted marker silenced the run", len(posted))
 	}
 }

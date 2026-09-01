@@ -195,7 +195,10 @@ orch watch -once
 [[ $(comments "$DEAD_ISSUE") -eq 1 ]] ||
   { echo "!!! FAIL: $(comments "$DEAD_ISSUE") comments on #$DEAD_ISSUE, want 1" >&2; thread "$DEAD_ISSUE" >&2; exit 1; }
 DEAD_BODY=$(thread "$DEAD_ISSUE")
-for want in "without writing a result" "DeadlineExceeded"; do
+# "the pod is gone" is the assertion that earns this stage: it is the only string
+# that cannot be produced with the pod still there, and the p == nil branch is what
+# no unit test can reach.
+for want in "without writing a result" "DeadlineExceeded" "the pod is gone"; do
   grep -q "$want" <<<"$DEAD_BODY" ||
     { echo "!!! FAIL: the comment on #$DEAD_ISSUE does not name '$want'" >&2; echo "$DEAD_BODY" >&2; exit 1; }
 done

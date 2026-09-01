@@ -166,8 +166,9 @@ func watch(args []string) {
 		return
 	}
 	// SIGTERM is how a Deployment rolls, and the informer's whole lifetime is this
-	// context — so a rollout stops the watch rather than being killed mid-report.
-	// Nothing is lost either way: the next process relists.
+	// context — which the handlers pass to GitHub, so a rollout really does abort a
+	// report mid-pagination or mid-POST. Nothing is lost: a POST that reached GitHub
+	// left the marker, and the next process relists and finds it either way.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Watch(ctx); err != nil {
