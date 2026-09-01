@@ -72,6 +72,51 @@ die() {
   exit 1
 }
 
+# ------------------------------------------------------------------- docker ---
+# ADR 0001's per-run flag, and it defaults **off**. The reason is not caution:
+# inside rootlesskit a process reads its own uid as 0, which trips the agent CLI's
+# root gate — needing exactly the IS_SANDBOX bypass the non-root posture exists to
+# avoid — and puts bubblewrap at risk for the same reason it fails as uid 0 under
+# gVisor. So the `go` image carries Docker, an ordinary run keeps the clean
+# uid-1000 posture, and only a run that asks for it pays. The orchestrator writes
+# SANDBOX_DOCKER=1 for a run that asked, and relaxes the two securityContext
+# fields the wrap needs at the same time.
+#
+# The **whole** script is wrapped, not just dockerd: that is what puts the agent,
+# the daemon and inner containers in one network namespace on host networking, so
+# a testcontainers-shaped test can reach the service it started. Wrapping dockerd
+# alone leaves inner containers with no address the agent can dial (#28).
+#
+# `--net=host` is not an option here rather than a preference: it panics dockerd on
+# the first `docker version` — a nil dereference upstream, not our bug.
+if [ "${SANDBOX_DOCKER:-0}" = 1 ] && [ -z "${IN_ROOTLESSKIT:-}" ]; then
+  PHASE=docker
+  command -v rootlesskit >/dev/null ||
+    die "SANDBOX_DOCKER=1 but this image carries no rootlesskit: only the go image does"
+  # /bin/sh "$0" rather than "$0": the run plan takes everything from the
+  # environment and nothing from argv, and this way it re-enters correctly whether
+  # it was invoked as the image's entrypoint or as a path.
+  #
+  # A child and not an `exec`, which costs a shell sitting in wait() for the whole
+  # run and buys the result channel back. rootlesskit failing to *start* is the
+  # one ending this ticket is actually about — `newuidmap: write to uid_map
+  # failed: Operation not permitted`, which is what a job template without the
+  # builder's two securityContext fields produces — and under `exec` nothing would
+  # be left to write the blob, so the informer would report a bare Kubernetes-level
+  # reason and the diagnostic would exist only in `kubectl logs`.
+  _rc=0
+  rootlesskit --net=slirp4netns --mtu=1500 --disable-host-loopback \
+    --port-driver=builtin --copy-up=/etc --copy-up=/run \
+    env IN_ROOTLESSKIT=1 /bin/sh "$0" || _rc=$?
+  # The inner run writes its own blob at every exit, so an empty one means
+  # rootlesskit never got as far as handing over — and this is the only place left
+  # that can say so. A blob that *is* there is the inner run's verdict and must
+  # survive untouched; only its status is carried out.
+  [ "$_rc" -eq 0 ] || [ -s "$TERM_LOG" ] ||
+    die "the rootlesskit wrap did not start (rc=$_rc): the pod needs allowPrivilegeEscalation and CAP_SETUID/CAP_SETGID for it — orchestrator run -docker sets both"
+  exit "$_rc"
+fi
+
 # ---------------------------------------------------------------- preflight ---
 # ADR 0001's contract, checked rather than commented — scion's `required_image_tools`
 # is declarative config with zero readers, so a non-conforming BYO image there fails
@@ -117,6 +162,45 @@ fi
 # cluster's business, so it is named here rather than guessed at from the symptom.
 [ -z "${SSL_CERT_FILE:-}" ] || [ -f "$SSL_CERT_FILE" ] ||
   die "SSL_CERT_FILE=$SSL_CERT_FILE does not exist: is the proxy CA mounted at /run/proxy-ca/ca.crt?"
+
+# The daemon, once, inside the namespace the block above re-entered through. Every
+# flag was measured under plain gVisor, uid 1000, unprivileged, and none of them is
+# a preference: gVisor cannot serve dockerd's iptables setup, creating a bridge
+# writes /proc/sys/net/ipv4/ip_forward which is EPERM for an unprivileged user
+# namespace, and the containerd snapshotter has to be off for `docker build`.
+# --data-root because the rootfs is read-only and the default is /var/lib/docker;
+# $HOME is an emptyDir the pod can write. The daemon's log goes to the runtime
+# directory created two lines above rather than to $WORKSPACE, which the run plan
+# does not create and does not reach until the clone — a redirect into a directory
+# that does not exist is a daemon that never starts and a `tail` with nothing to
+# say about why.
+if [ -n "${IN_ROOTLESSKIT:-}" ]; then
+  PHASE=docker
+  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/docker}
+  DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+  export XDG_RUNTIME_DIR DOCKER_HOST
+  # die() and not ${HOME:?…}, which would abort the shell with a bare message and
+  # leave the run with no result blob — the one thing every exit here owes.
+  [ -n "${HOME:-}" ] || die "HOME is unset: the daemon has nowhere to put its data root"
+  mkdir -p "$XDG_RUNTIME_DIR" "$HOME/.local/share/docker" ||
+    die "could not create the daemon's runtime and data directories"
+  log "start dockerd"
+  dockerd --iptables=false --ip6tables=false --bridge=none \
+    --feature containerd-snapshotter=false \
+    --data-root "${HOME}/.local/share/docker" --host "$DOCKER_HOST" \
+    > "$XDG_RUNTIME_DIR/dockerd.log" 2>&1 &
+  # `docker version`, never `docker info`: info answers about six seconds before
+  # the daemon is actually usable, so an info gate races the run's first
+  # `docker run` and fails it for a reason that looks like anything but a race.
+  _i=0
+  until docker version >/dev/null 2>&1; do
+    _i=$((_i + 1))
+    [ "$_i" -lt 90 ] ||
+      die "dockerd did not become usable: $(tail -3 "$XDG_RUNTIME_DIR/dockerd.log" | tr '\n' ' ')"
+    sleep 1
+  done
+  log "dockerd $(docker version --format '{{.Server.Version}}')"
+fi
 
 # -------------------------------------------------------------------- clone ---
 PHASE=clone

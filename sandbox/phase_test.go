@@ -40,6 +40,7 @@ func TestRunPlan(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		stubs  []stub
+		env    []string
 		exit   int
 		before func(t *testing.T, h harness)
 		check  func(t *testing.T, r Result, h harness)
@@ -58,6 +59,9 @@ func TestRunPlan(t *testing.T) {
 			eq(t, "branch", r.Branch, "implementer/issue-42")
 			eq(t, "commits", r.Commits, 3)
 			eq(t, "cost", fmt.Sprintf("%.3f", r.CostUSD), "2.030")
+			// The wrap defaults off, and this is where that is asserted: rootlesskit
+			// is on PATH for every case, so its absence here is the run plan's doing.
+			eq(t, "unwrapped", h.used(t, "rootlesskit.args"), false)
 			// The title round-trips byte for byte, quotes and newline included.
 			eq(t, "pr_title", r.PRTitle, issueTitle)
 			if r.ElapsedS < 0 {
@@ -328,13 +332,101 @@ func TestRunPlan(t *testing.T) {
 				t.Error("a phase ran despite the preflight failing")
 			}
 		},
+	}, {
+		// ADR 0001's per-run flag, on. The whole script is wrapped and not just
+		// the daemon: that is what puts the agent, dockerd and inner containers in
+		// one network namespace, and it is why this re-enters the run plan rather
+		// than backgrounding something.
+		name: "SANDBOX_DOCKER=1 wraps the whole run plan and waits for a usable daemon",
+		env:  []string{"SANDBOX_DOCKER=1"},
+		stubs: []stub{
+			{sideFX: commit("feat.go"), result: result(0.5, map[string]any{
+				"status": "completed", "summary": "wrote the thing", "pr_title": "feat: a thing"})},
+			{result: result(0.1, map[string]any{
+				"status": "completed", "summary": "nothing to review", "findings": 0, "fixed": 0})},
+			{result: result(0.1, map[string]any{
+				"status": "completed", "summary": "nothing to cut", "findings": 0, "fixed": 0})},
+		},
+		check: func(t *testing.T, r Result, h harness) {
+			// The run still completes: the wrap is transparent to everything after it.
+			eq(t, "status", r.Status, "completed")
+			eq(t, "commits", r.Commits, 1)
+
+			args := h.stubArgs(t, "rootlesskit.args")
+			// --net=host is not a preference: it panics dockerd on the first
+			// `docker version`, which is the call the gate below makes.
+			contains(t, "rootlesskit net", args, "--net=slirp4netns")
+			contains(t, "rootlesskit copies /etc up", args, "--copy-up=/etc")
+			contains(t, "the wrap re-enters the run plan", args, "IN_ROOTLESSKIT=1")
+
+			d := h.stubArgs(t, "dockerd.args")
+			// gVisor cannot serve dockerd's iptables setup, creating a bridge is
+			// EPERM in an unprivileged user namespace, and `docker build` needs the
+			// containerd snapshotter off. None of the three is a preference.
+			for _, f := range []string{"--iptables=false", "--ip6tables=false",
+				"--bridge=none", "containerd-snapshotter=false"} {
+				contains(t, "dockerd flags", d, f)
+			}
+
+			// The gate polled until the daemon answered rather than taking the
+			// first no for an answer — the stub says no twice — and the fourth call
+			// is the log line naming the version it got.
+			eq(t, "docker version calls", h.readStub(t, "dockerv"), "4\n")
+		},
+	}, {
+		// The flag is the run plan's and the stack is the go image's, so asking a
+		// node or python image for Docker has to fail *here*, named, before
+		// anything is spent — not as an `docker: not found` inside a phase that
+		// has already cost a dollar.
+		name: "SANDBOX_DOCKER=1 in an image with no rootlesskit fails before anything is spent",
+		env:  []string{"SANDBOX_DOCKER=1"},
+		before: func(t *testing.T, h harness) {
+			if err := os.Remove(filepath.Join(h.stubs, "rootlesskit")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		exit: 1,
+		check: func(t *testing.T, r Result, h harness) {
+			eq(t, "status", r.Status, "failed")
+			contains(t, "message names the missing piece", r.Message, "rootlesskit")
+			eq(t, "cost", r.CostUSD, 0.0)
+			if _, err := os.Stat(filepath.Join(h.stubs, "n")); err == nil {
+				t.Error("a phase ran despite the wrap being impossible")
+			}
+		},
+	}, {
+		// The ending the whole per-run flag is about: a pod that was handed
+		// SANDBOX_DOCKER=1 without the securityContext the wrap needs. rootlesskit
+		// dies before it can hand over, and the run plan is the only thing left
+		// that can say why — which is why the wrap runs as a child rather than
+		// through `exec`, and why the blob still exists here at all.
+		name: "a rootlesskit that will not start still leaves a result blob naming the cause",
+		env:  []string{"SANDBOX_DOCKER=1"},
+		before: func(t *testing.T, h harness) {
+			write(t, filepath.Join(h.stubs, "rootlesskit"), `#!/bin/sh
+echo "newuidmap: write to uid_map failed: Operation not permitted" >&2
+exit 1
+`)
+		},
+		exit: 1,
+		check: func(t *testing.T, r Result, h harness) {
+			eq(t, "status", r.Status, "failed")
+			contains(t, "message names the wrap", r.Message, "rootlesskit wrap did not start")
+			// The message has to carry the fix, because the cause is a PodSpec
+			// field and the symptom is a message about uid maps.
+			contains(t, "message names the fix", r.Message, "allowPrivilegeEscalation")
+			eq(t, "cost", r.CostUSD, 0.0)
+			if _, err := os.Stat(filepath.Join(h.stubs, "n")); err == nil {
+				t.Error("a phase ran despite the wrap never starting")
+			}
+		},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := setup(t, tc.stubs)
 			if tc.before != nil {
 				tc.before(t, h)
 			}
-			tc.check(t, h.run(t, tc.exit), h)
+			tc.check(t, h.run(t, tc.exit, tc.env...), h)
 		})
 	}
 }
@@ -398,6 +490,33 @@ exit "$(cat "$STUBS/$n.rc")"
 	// here shells out to it.
 	write(t, filepath.Join(h.stubs, "bwrap"), "#!/bin/sh\nexit 0\n")
 
+	// The rootless Docker stack, stubbed. On PATH for every case, so "the wrap is
+	// off by default" is an assertion about the run plan rather than about what
+	// the harness happened to install — the go image really does carry all three.
+	//
+	// rootlesskit records that it ran and its own flags, drops them, and execs the
+	// rest: what it is handed is `env IN_ROOTLESSKIT=1 /bin/sh <the run plan>`, so
+	// the re-entry is the real one and the second pass is a real second pass.
+	write(t, filepath.Join(h.stubs, "rootlesskit"), `#!/bin/sh
+printf '%s\0' "$@" > "$STUBS/rootlesskit.args"
+while [ "${1#--}" != "$1" ]; do shift; done
+exec "$@"
+`)
+	write(t, filepath.Join(h.stubs, "dockerd"), `#!/bin/sh
+printf '%s\0' "$@" > "$STUBS/dockerd.args"
+`)
+	// `docker version` fails twice before it answers, because the readiness gate
+	// is the point: `docker info` answers about six seconds before the daemon is
+	// usable, so a gate that takes the first answer is a race the run loses later.
+	write(t, filepath.Join(h.stubs, "docker"), `#!/bin/sh
+[ "$1" = version ] || exit 0
+n=$(( $(cat "$STUBS/dockerv" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUBS/dockerv"
+[ "$n" -ge 3 ] || exit 1
+[ "$2" = --format ] && echo 29.7.2
+exit 0
+`)
+
 	issue, err := json.Marshal(map[string]any{
 		"title": issueTitle, "body": "cover count, sum, min, max.\nEasy to extend.",
 		"comments": []any{map[string]any{
@@ -436,7 +555,7 @@ exit "$(cat "$STUBS/$n.rc")"
 }
 
 // run executes the shipped run plan and returns the blob it wrote.
-func (h harness) run(t *testing.T, wantExit int) Result {
+func (h harness) run(t *testing.T, wantExit int, extra ...string) Result {
 	t.Helper()
 	ws := filepath.Join(h.dir, "workspace")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
@@ -447,6 +566,7 @@ func (h harness) run(t *testing.T, wantExit int) Result {
 		"REPO=owner/repo", "ISSUE=42", "GH_TOKEN="+sentinel,
 		"WORKSPACE="+ws, "TERM_LOG="+h.termLog, "OPT="+h.opt,
 		"STUBS="+h.stubs, "PATH="+h.stubs+":"+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, extra...)
 	out, err := cmd.CombinedOutput()
 	exit := 0
 	var ee *exec.ExitError
@@ -498,6 +618,35 @@ func (h harness) blob(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// used reports whether a stub recorded an invocation. The stubs are on PATH for
+// every case, so this is what makes "the run plan did not reach for it" an
+// assertion rather than an absence.
+func (h harness) used(t *testing.T, name string) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(h.stubs, name))
+	return err == nil
+}
+
+// stubArgs is the NUL-joined argv a stub recorded, rendered readable.
+func (h harness) stubArgs(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(h.stubs, name))
+	if err != nil {
+		t.Fatalf("%s recorded nothing: %v", name, err)
+	}
+	return strings.ReplaceAll(string(b), "\x00", " ")
+}
+
+// readStub is a counter or marker a stub left behind, verbatim.
+func (h harness) readStub(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(h.stubs, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // args is the prompt and flags the nth `claude` invocation was handed, NUL-joined.

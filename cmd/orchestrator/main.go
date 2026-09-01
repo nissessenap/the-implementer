@@ -6,7 +6,7 @@
 // endpoint: the two share startRun, so what the webhook does is what `run` does.
 //
 //	orchestrator serve [-addr :8080]
-//	orchestrator run [-dry-run] [-toolchain go] owner/repo#5
+//	orchestrator run [-dry-run] [-toolchain go] [-docker] owner/repo#5
 //	orchestrator watch [-once]
 //	orchestrator cred owner repo issue run-uid
 package main
@@ -58,7 +58,7 @@ func main() {
 
 func usage() {
 	log.Fatal("usage: orchestrator serve [-addr :8080]\n" +
-		"       orchestrator run [-dry-run] [-toolchain <t>] <owner>/<repo>#<n>\n" +
+		"       orchestrator run [-dry-run] [-toolchain <t>] [-docker] <owner>/<repo>#<n>\n" +
 		"       orchestrator watch [-once]\n" +
 		"       orchestrator cred <owner> <repo> <issue> <run-uid>")
 }
@@ -67,6 +67,7 @@ func run(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	dry := fs.Bool("dry-run", false, "send the Job to the apiserver for validation only — it answers whether the derived name is accepted, which is the one question no amount of reasoning about DNS-1123 settles")
 	toolchain := fs.String("toolchain", os.Getenv("TOOLCHAIN"), "ADR 0003's answer for this repository; unset is legal and means the review phase runs with no language subagent")
+	docker := fs.Bool("docker", false, "wrap the run plan in rootlesskit so the sandbox has a container runtime — only the go image carries one, it costs the run its uid-1000 posture inside the namespace and the two securityContext fields Pod Security Standards `restricted` forbids, and it is off by default")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		usage()
@@ -82,6 +83,8 @@ func run(args []string) {
 	r.UID = uid()
 
 	cfg := runConfig(*toolchain)
+	// Per-run and only here: `serve` has no way to ask for it, deliberately.
+	cfg.Docker = *docker
 	ctx, kube := context.Background(), client()
 	// One word first, then the reference: the e2e reads $2 off this line, and a
 	// verb with a space in it would make the parse depend on which branch ran.

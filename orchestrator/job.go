@@ -86,6 +86,19 @@ type Config struct {
 	// Toolchain is ADR 0003's answer for this repository, and **unset is legal**:
 	// it means the review phase runs without a language subagent.
 	Toolchain string
+
+	// Docker turns on ADR 0001's rootlesskit wrap for this run, and it defaults
+	// off. Per-run rather than per-install because the wrap is not free: inside
+	// rootlesskit the process reads its own uid as 0, which trips the agent CLI's
+	// root gate and puts bubblewrap at risk, and the container needs the two
+	// capabilities below back. A run that does not ask for it pays none of that.
+	//
+	// Nothing here checks that the image can honour it — only the `go` image
+	// carries the stack, and the run plan refuses by name when it does not. This
+	// is not derived from the toolchain either: whether a repository *wants* a
+	// container runtime needs far more of it than ADR 0003 ever looks at, and
+	// guessing it wrong is the silent-failure class that ADR exists to avoid.
+	Docker bool
 }
 
 // LoadTemplate reads the Job template the chart renders. In a cluster this is a
@@ -150,8 +163,45 @@ func (c Config) Build(r proxy.Run) *batchv1.Job {
 	for i := range j.Spec.Template.Spec.Containers {
 		ct := &j.Spec.Template.Spec.Containers[i]
 		ct.Env = append(ct.Env, env...)
+		if c.Docker {
+			relaxForRootlesskit(ct)
+		}
 	}
 	return j
+}
+
+// relaxForRootlesskit is the posture a Docker run costs, and it is written here
+// rather than left to the operator because without it the run fails inside
+// rootlesskit with `newuidmap: write to uid_map failed: Operation not permitted`
+// — a message that names neither of its two causes.
+//
+// Both are measured, under plain gVisor at uid 1000. `newuidmap` is privileged by
+// a **file capability** (a setuid-root exec grants no capabilities at all under
+// gVisor), so: no_new_privs blocks the file capability exactly as it blocks
+// setuid, and `drop: [ALL]` empties the bounding set the file capability is
+// intersected with. Nothing else about the posture moves — not the uid, not the
+// read-only rootfs, not the seccomp profile, not the runtime class.
+//
+// ⚠️ These two fields are also exactly what Pod Security Standards `restricted`
+// forbids, and the chart's own template advertises compliance with it. In a
+// namespace labelled `pod-security.kubernetes.io/enforce=restricted` a `-docker`
+// run therefore creates its Job successfully and then has **every pod rejected at
+// admission**, so it sits with no pods until activeDeadlineSeconds expires and is
+// reported as a deadline with no hint of the cause. There is nothing to do about
+// it here — the wrap genuinely needs the capability — so it is stated rather than
+// worked around: such a namespace needs `baseline` (or an exemption) before a
+// Docker run is asked for, and a default run is unaffected either way.
+func relaxForRootlesskit(ct *corev1.Container) {
+	if ct.SecurityContext == nil {
+		ct.SecurityContext = &corev1.SecurityContext{}
+	}
+	yes := true
+	ct.SecurityContext.AllowPrivilegeEscalation = &yes
+	if ct.SecurityContext.Capabilities == nil {
+		ct.SecurityContext.Capabilities = &corev1.Capabilities{}
+	}
+	ct.SecurityContext.Capabilities.Add = append(ct.SecurityContext.Capabilities.Add,
+		corev1.Capability("SETUID"), corev1.Capability("SETGID"))
 }
 
 // env is the sandbox environment. What is *not* here is the point: no model
@@ -213,6 +263,12 @@ func (c Config) env(r proxy.Run) []corev1.EnvVar {
 	// tests for presence.
 	if c.Toolchain != "" {
 		e = append(e, corev1.EnvVar{Name: "TOOLCHAIN", Value: c.Toolchain})
+	}
+	// Off is the *absence* of the variable rather than "0", for the same reason
+	// as TOOLCHAIN above: the run plan tests one thing, and a default run's
+	// environment says nothing about a feature it is not using.
+	if c.Docker {
+		e = append(e, corev1.EnvVar{Name: "SANDBOX_DOCKER", Value: "1"})
 	}
 	return e
 }
