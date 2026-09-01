@@ -335,8 +335,9 @@ survives the ephemeral `HOME`.
 **Result channel** — how data leaves the sandbox without `kubectl exec`. A compact
 structured result via `/dev/termination-log`, surfaced on pod status; the full
 transcript via `pods/log`. Both are pod-level, which is why the orchestrator's
-informer watches Pods at all — it watches Jobs *as well*, for the one ending that
-leaves no pod behind (ADR 0004, amended 2026-08-31).
+informer reads the run's pod on every report — but it *watches* Jobs, whose terminal
+condition is the one signal that also covers the ending that leaves no pod behind
+(ADR 0004, amended 2026-08-31 and 2026-09-01).
 
 **Result blob** — the JSON the phase script accumulates and writes once onto
 `/dev/termination-log`: overall status, branch, commit count, summed cost, elapsed,

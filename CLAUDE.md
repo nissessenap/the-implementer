@@ -58,9 +58,10 @@ pushed to. Expect ~450s and ~$2 for three phases against a small repo.
 
 ### The orchestrator's informer
 
-`orchestrator watch` is ADR 0004's informer half. It watches Pods **and** Jobs in
-its namespace and gives every ending one issue comment — built from the run plan's
-blob when there is one, and from the Kubernetes-level reason when there is not.
+`orchestrator watch` is ADR 0004's informer half. It watches the Jobs in its
+namespace, reads their pods on demand, and gives every ending one issue comment —
+built from the run plan's blob when there is one, and from the Kubernetes-level
+reason when there is not.
 
 ```sh
 POD_NAMESPACE=… GITHUB_APP_ID=… GITHUB_APP_PROVIDER=gcp GITHUB_APP_KEY=… \
@@ -75,16 +76,21 @@ Three things about it are load-bearing and easy to "simplify" back out:
   all, so nothing inside the sandbox can report them. Delete this component and a
   run that dies that way leaves the issue labelled `ready-for-agent` with nobody
   ever told it happened.
-- **Jobs are watched as well as Pods, and not for symmetry.** The *result* is
-  pod-level — the blob is the container's terminated `message`, the digest is its
-  `imageID` — but when the deadline expires the Job controller **deletes** the pod,
-  so the Job's condition is the only record of the one ending a human has no other
-  way to learn about.
+- **The Job is the trigger; the pod is the result.** The blob is the container's
+  terminated `message` and the digest is its `imageID`, so the pod is read (by run
+  annotation, not by job name) on every report — but nothing *watches* one. The Job's
+  terminal condition is the only signal that covers every ending: the controller
+  defers it until the pods are terminal (1.31), so the blob is already readable when
+  it arrives, and when the deadline expires it **deletes** the pod, leaving the
+  condition as the sole record of the one ending a human has no other way to learn
+  about. A Pod informer as well would only ever fire too early to report or after
+  the Job event already did.
 - **The exactly-once record is the comment.** `<!-- implementer-run: <uid> -->` on
   its first line, scanned for before every write. There is no database (ADR 0004)
   and the RBAC is read-only on Pods and Jobs, so there is nowhere in Kubernetes to
   mark a run as reported — which is also why nothing here needs to survive a
-  restart.
+  restart, and why the in-process `done` set is a cost optimisation and never the
+  argument.
 
 `GITHUB_API_URL` is the seam, handed to both clients — ghait's mint path and the
 orchestrator's own calls — and it is what stage 90 points at a mock.

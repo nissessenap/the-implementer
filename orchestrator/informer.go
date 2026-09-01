@@ -8,7 +8,6 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/go-github/v88/github"
@@ -24,10 +23,10 @@ import (
 )
 
 // runSelector is the builder's own label, spelled as a selector — from the same two
-// constants job.go writes it from, because two copies of "app=implementer" is
-// exactly the drift runOf's comment claims this package does not have. It is the
-// whole of the list scope, and what keeps every watch here off other workloads in
-// the namespace.
+// constants job.go writes it from, because two copies of "app=implementer" is the
+// same drift proxy.RunFromAnnotations exists to keep out of the annotations. It is
+// the whole of the list scope, and what keeps every watch here off other workloads
+// in the namespace.
 const runSelector = runLabelKey + "=" + runLabelValue
 
 // resync is the informer's periodic relist, and it is the safety net under every
@@ -167,24 +166,18 @@ type Reporter struct {
 	NS   string
 	GH   *GitHub
 
-	// ponytail: one lock over every run, held across the GitHub round trip, so two
-	// runs ending at once are reported one after the other. Reports are two API
-	// calls at the end of a multi-minute run, so the contention is theoretical —
-	// and the lock is what makes "exactly once" hold when the Pod handler and the
-	// Job handler both fire for the same run. Per-run locks if that stops being
-	// true.
-	//
-	// It is a *process* lock, so this assumes one replica: the read and the write
-	// below are not one atomic operation, and two orchestrators would both find no
-	// marker and both comment. There is no Deployment yet, and the webhook ticket
-	// that adds one is where controller-runtime's leader election goes — which ADR
-	// 0004 already counts on ("no leader-election story beyond what
-	// controller-runtime gives for free"). Do not scale this to two replicas before
-	// then.
-	mu sync.Mutex
 	// done is the fast path only, and never the correctness argument: it keeps a
-	// resync from asking GitHub about runs already reported. The marker in the
-	// thread is what survives a restart, which is why nothing here is persisted.
+	// resync from minting a token and reading a thread for runs it already reported.
+	// The marker in the thread is what survives a restart, which is why nothing
+	// here is persisted.
+	//
+	// ponytail: unguarded, because there is one informer and its handlers run on one
+	// goroutine, and `watch -once` is Reconcile with no informer at all. A second
+	// informer, a worker pool or a second replica needs a lock here — and note that
+	// a lock would only ever have been a *process* one, so it was never what made
+	// "exactly once" hold across processes either. The thread is. ADR 0004 puts
+	// leader election on the webhook ticket that first adds a Deployment; do not run
+	// two replicas before then.
 	//
 	// ponytail: never swept, so it is one 8-byte run uid per run this process ever
 	// sees — bounded by the process's lifetime, and the Jobs it was reading are
@@ -212,38 +205,41 @@ func (r *Reporter) Reconcile(ctx context.Context) error {
 
 // Watch is Reconcile, continuously.
 //
-// Two informers, and the Job one is not redundant: the *result* is pod-level —
-// the blob is the container's terminated message, the resolved digest is its
-// imageID, the transcript is `pods/log` — which is why this watches Pods at all.
-// But when `activeDeadlineSeconds` expires the Job controller **deletes** the
-// active pods, so the deadline is the one ending that produces no terminal pod and
-// no further pod event. The Job's condition is the only record left of it, and
-// that is the ending a human has no other way to learn about.
+// Jobs, and only Jobs, though the *result* is pod-level — the blob is the
+// container's terminated message, the resolved digest is its imageID, the
+// transcript is `pods/log`, all of which report reads off the pod directly
+// (podOf). The Job's terminal condition is the *trigger* because it is the one
+// signal that covers every ending: the Job controller defers it until the pods are
+// terminal (1.31), so the blob is already readable by the time it arrives — and
+// when `activeDeadlineSeconds` expires the controller **deletes** the pod, leaving
+// the condition as the only record of the ending a human has no other way to learn
+// about.
 //
-// Both handlers funnel into one place keyed by the Job, so there is a single
-// decision path whichever object woke it.
+// ponytail: a Pod informer as well would fire either before the condition, where
+// report has nothing to say, or after it, where the Job event has already said it.
+// Add one when there is an ending the Job's condition does not follow.
 func (r *Reporter) Watch(ctx context.Context) error {
 	f := informers.NewSharedInformerFactoryWithOptions(r.Kube, resync,
 		informers.WithNamespace(r.NS),
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = runSelector }))
 
-	pods, jobs := f.Core().V1().Pods().Informer(), f.Batch().V1().Jobs().Informer()
-	if _, err := pods.AddEventHandler(handler(func(o any) {
-		if p, ok := o.(*corev1.Pod); ok {
-			r.reportJob(ctx, p.Labels[batchv1.JobNameLabel])
+	// The cache's own object rather than a re-Get of it: report only reads the Job.
+	report := func(o any) {
+		j, ok := o.(*batchv1.Job)
+		if !ok {
+			return
 		}
-	})); err != nil {
-		return err
+		if err := r.report(ctx, j); err != nil {
+			log.Printf("informer: %v", err)
+		}
 	}
-	if _, err := jobs.AddEventHandler(handler(func(o any) {
-		// The cache's own object rather than reportJob's re-Get of it: report only
-		// reads the Job, and this is the same object that Get would return.
-		if j, ok := o.(*batchv1.Job); ok {
-			if err := r.report(ctx, j); err != nil {
-				log.Printf("informer: %v", err)
-			}
-		}
-	})); err != nil {
+	// Add and Update, and deliberately not Delete: a Job deleted before it reached
+	// a condition has nothing left to report, and one deleted after it was already
+	// reported on.
+	if _, err := f.Batch().V1().Jobs().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    report,
+		UpdateFunc: func(_, o any) { report(o) },
+	}); err != nil {
 		return err
 	}
 
@@ -270,44 +266,18 @@ func (r *Reporter) Watch(ctx context.Context) error {
 	return nil
 }
 
-// handler is Add and Update, and deliberately not Delete: a pod deleted before its
-// Job reached a condition has nothing to report yet, and the Job event that follows
-// is the one that does.
-func handler(f func(any)) cache.ResourceEventHandler {
-	return cache.ResourceEventHandlerFuncs{
-		AddFunc:    f,
-		UpdateFunc: func(_, o any) { f(o) },
-	}
-}
-
-func (r *Reporter) reportJob(ctx context.Context, name string) {
-	if name == "" {
-		return
-	}
-	j, err := r.Kube.BatchV1().Jobs(r.NS).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		// Not fatal and not retried here: the resync brings it round again, and a
-		// Job that is genuinely gone has nothing left to report.
-		log.Printf("informer: reading job %s: %v", name, err)
-		return
-	}
-	if err := r.report(ctx, j); err != nil {
-		log.Printf("informer: %v", err)
-	}
-}
-
 // report is the whole decision: is this a run of ours, has it ended, was it
 // already reported, and what does it say.
 func (r *Reporter) report(ctx context.Context, j *batchv1.Job) error {
-	run := runOf(j.Annotations)
+	// The same reader the credential proxy uses on the Pod, so there is one
+	// spelling of the four annotations in the system rather than two that can drift.
+	run := proxy.RunFromAnnotations(j.Annotations)
 	// Anything in this namespace that is not one of our runs. The label narrowed
 	// the list; the annotations are what actually identify a run.
 	if !run.Complete() || terminal(j) == nil {
 		return nil
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if _, ok := r.done[run.UID]; ok {
 		return nil
 	}
@@ -358,14 +328,6 @@ func (r *Reporter) podOf(ctx context.Context, run proxy.Run) (*corev1.Pod, error
 		}
 	}
 	return nil, nil
-}
-
-// runOf reads run identity off the annotations the Job builder writes. The same
-// four constants the credential proxy reads off the Pod, so there is one set of
-// strings in the system rather than two that can drift.
-func runOf(a map[string]string) proxy.Run {
-	return proxy.Run{Owner: a[proxy.AnnOwner], Repo: a[proxy.AnnRepo],
-		Issue: a[proxy.AnnIssue], UID: a[proxy.AnnRunUID]}
 }
 
 // read fills in the half of the Outcome that comes off Kubernetes: the blob if the
@@ -455,19 +417,15 @@ func why(j *batchv1.Job, p *corev1.Pod) string {
 	return strings.Join(parts, " — ")
 }
 
-// agent is the run's container status. The Job template has exactly one container,
-// so this is the first one — matched by name where there is one to match, because a
-// BYO image's PodSpec is the operator's and the name is theirs to choose.
+// agent is the run's container status. The Job template has exactly one container
+// (charts/orchestrator/templates/job-template.yaml), so this is that one.
+//
+// ponytail: index 0 rather than a match on the container's name. A BYO PodSpec that
+// adds a second *plain* container wants the name match back — a native sidecar does
+// not, because those land in initContainerStatuses.
 func agent(p *corev1.Pod) *corev1.ContainerStatus {
 	if p == nil || len(p.Status.ContainerStatuses) == 0 {
 		return nil
-	}
-	if len(p.Spec.Containers) > 0 {
-		for i, cs := range p.Status.ContainerStatuses {
-			if cs.Name == p.Spec.Containers[0].Name {
-				return &p.Status.ContainerStatuses[i]
-			}
-		}
 	}
 	return &p.Status.ContainerStatuses[0]
 }

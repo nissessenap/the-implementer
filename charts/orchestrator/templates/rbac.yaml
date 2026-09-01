@@ -9,11 +9,12 @@
 # `activeDeadlineSeconds` expires the Job controller deletes the active pods, so the
 # Job's condition is the only record of it.
 #
-# On Pods it is read-only, and that is load-bearing rather than minimalism: both
-# result channels are pod-level (the blob is the container's terminated `message`,
-# the resolved digest is its `imageID`), and with no way to write to a Pod the
-# informer cannot mark a run as reported in Kubernetes. Which is why the
-# exactly-once record is the issue comment itself.
+# On Pods it is `list` alone. Both result channels are pod-level (the blob is the
+# container's terminated `message`, the resolved digest is its `imageID`) but the
+# Job's condition is what triggers a report, so the pod is read on demand and never
+# watched. That it is read-only is load-bearing rather than minimalism: with no way
+# to write to a Pod the informer cannot mark a run as reported in Kubernetes, which
+# is why the exactly-once record is the issue comment itself.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -29,7 +30,7 @@ rules:
     verbs: ["create", "get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -38,6 +38,17 @@ type Run struct {
 // mint scope reads: mint for this repository, never for the one the URL names.
 func (r Run) String() string { return r.Owner + "/" + r.Repo + "#" + r.Issue }
 
+// RunFromAnnotations reads run identity off the four annotations above. Here rather
+// than at each reader, because there are two — the proxy off the Pod, the
+// orchestrator's informer off the Job — and two spellings of the same four lookups
+// is exactly the drift the exported constants exist to prevent.
+//
+// It does not check Complete: what an incomplete claim means is the caller's, and
+// the two disagree. The proxy refuses it; the informer skips the object.
+func RunFromAnnotations(a map[string]string) Run {
+	return Run{Owner: a[AnnOwner], Repo: a[AnnRepo], Issue: a[AnnIssue], UID: a[AnnRunUID]}
+}
+
 // Cred derives the run's proxy credential from the one long-lived shared key both
 // components mount. The orchestrator injects it as userinfo in the sandbox's
 // https_proxy URL — every client derives Proxy-Authorization from that unaided —

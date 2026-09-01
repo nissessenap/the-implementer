@@ -28,11 +28,11 @@ Label an issue `ready-for-agent`; a draft pull request appears.
      preflight · clone · brief
      implement · review · ponytail-review
      push · report
-5. informer sees the terminal pod   ──► orchestrator
+5. informer sees the Job end        ──► orchestrator
 6. draft PR + issue comment                                              (GitHub)
 ```
 
-Three components: the **orchestrator** (webhook front-end plus Pod informer),
+Three components: the **orchestrator** (webhook front-end plus run informer),
 the **credential proxy** (a Deployment; every credential terminates here), and
 the **sandbox** (one Job per run). No database, no queue, no worker pool.
 

@@ -103,23 +103,22 @@ helm upgrade --install "$ORCH" "$E2E_DIR/../charts/orchestrator" -n "$NS" \
   --set-string sandbox.resources.limits.memory=256Mi \
   --wait --timeout=60s >/dev/null
 
-stage "the RBAC the informer needs, and what it still does not have"
-for verb in list watch; do
-  for res in pods jobs; do
-    kubectl auth can-i "$verb" "$res" -n "$NS" --as="system:serviceaccount:$NS:$ORCH" >/dev/null \
-      || { echo "!!! FAIL: the orchestrator's ServiceAccount cannot $verb $res" >&2; exit 1; }
-  done
-done
-# Read-only on Pods, and that is load-bearing rather than minimalism: with no way to
-# write to a Pod there is nowhere in Kubernetes to mark a run as reported, which is
-# why the exactly-once record is the comment itself.
+stage "what the RBAC still does not allow"
+# Only the negative half is asserted here: the verbs the informer *needs* are proven
+# by the rest of the stage, which cannot report anything without them, and a can-i
+# loop over them only asserts that Helm rendered the YAML in this repository.
+#
+# Read-only on Pods is the one that no other assertion covers, and it is load-bearing
+# rather than minimalism: with no way to write to a Pod there is nowhere in
+# Kubernetes to mark a run as reported, which is why the exactly-once record is the
+# comment itself.
 for verb in patch update; do
   if kubectl auth can-i "$verb" pods -n "$NS" --as="system:serviceaccount:$NS:$ORCH" >/dev/null 2>&1; then
     echo "!!! FAIL: the orchestrator can $verb pods" >&2
     exit 1
   fi
 done
-echo "PROBE rbac             pods/jobs get,list,watch — read-only on pods, no Secrets"
+echo "PROBE rbac             read-only on pods, no Secrets"
 
 kubectl -n "$NS" get cm "$ORCH-job-template" -o jsonpath='{.data.job\.yaml}' > "$TMPL"
 

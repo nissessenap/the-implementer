@@ -44,7 +44,7 @@ GitHub ──webhook──► front-end ──create Job──► apiserver
                                                   │
                                              Job runs
                                                   │
-          informer ◄──watch Pods + Jobs───────────┘
+          informer ◄──watch Jobs, read Pods───────┘
               │
               ├─► POST pull request       (GitHub)
               └─► POST issue comment      (GitHub)
@@ -74,12 +74,23 @@ that is still why a Job watch cannot replace it. What it missed is one ending. W
 run happened at all — and the deadline is precisely the ending a human has no other
 way to learn about, which is the reason this component exists.
 
-So both informers run and both funnel into one decision keyed by the Job: Pods
-answer *what the run did*, the Job answers *that it ended*. "Watching Jobs rather
-than Pods" stays rejected below, on its own terms; watching only Pods is what turned
-out to be wrong. The cost is one verb — `jobs: watch` — on a Role that already had
-`jobs: get,list`. Measured in `e2e/90-informer.sh`, which expires a real deadline
-and asserts the comment is still posted.
+So the split is: the Pod answers *what the run did*, the Job answers *that it
+ended*. "Watching Jobs rather than Pods" stays rejected below, on its own terms;
+watching only Pods is what turned out to be wrong. The cost is one verb —
+`jobs: watch` — on a Role that already had `jobs: get,list`. Measured in
+`e2e/90-informer.sh`, which expires a real deadline and asserts the comment is
+still posted.
+
+**Amended again 2026-09-01: only the Job is watched.** The split above is unchanged
+and so is every argument for it — the Pod is still the whole of the result, and the
+informer still reads it on every report. What changed is that it reads it *on
+demand* rather than from a second informer. Reporting is gated on the Job's terminal
+condition, and since 1.31 the Job controller defers that condition until its pods
+are terminal, so a Pod event can only arrive before the gate opens (nothing to
+report) or after the Job event has already reported (a duplicate). The second
+informer's `pods: watch` was never reachable behaviour. The Pod is found by the
+run's own annotation rather than by `job-name`, because the Job name is per-issue
+and a re-run would otherwise read the previous run's pod.
 
 On a terminal Pod the informer reads the blob, and — per the [push and PR
 decision][push] — opens a draft pull request if commits exist, or posts an issue
