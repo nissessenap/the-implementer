@@ -185,7 +185,7 @@ run_toolchain python "$PREFIX-python:$TAG" "$PYTHON_REPO#$ISSUE" -toolchain pyth
 set -eu
 [ "${SANDBOX_DOCKER:-}" = 1 ] || { echo "!!! FAIL: -docker did not reach the sandbox" >&2; exit 1; }
 exec rootlesskit --net=slirp4netns --mtu=1500 --disable-host-loopback \
-  --port-driver=builtin --copy-up=/etc --copy-up=/run /bin/sh -c '
+  --copy-up=/etc --copy-up=/run /bin/sh -c '
   echo "PROBE inside           uid=$(id -u) map=$(tr -s " " < /proc/self/uid_map | tr "\n" "|")"
   export XDG_RUNTIME_DIR=/tmp/docker DOCKER_HOST=unix:///tmp/docker/docker.sock
   mkdir -p "$XDG_RUNTIME_DIR" "$HOME/.local/share/docker"
@@ -199,10 +199,13 @@ exec rootlesskit --net=slirp4netns --mtu=1500 --disable-host-loopback \
     sleep 1
   done
   echo "PROBE dockerd          $(docker version --format "{{.Server.Version}}") ready on the version gate"
-  # Reported, not asserted: the PodSpec mounts no /dev/fuse, so fuse-overlayfs
-  # cannot be used and this is expected to read `vfs` — which is slow and
-  # disk-hungry in a 3Gi pod. If it does, the go image is carrying fuse-overlayfs
-  # for nothing and the package should go (#74 review).
+  # Reported, not asserted, and the one number here worth reading. The image
+  # carries no fuse-overlayfs — it is a FUSE filesystem and the PodSpec mounts no
+  # /dev/fuse, so dockerd could never have selected it — which leaves `overlay2`
+  # or `vfs`. overlay2 is what the #28 spike measured in this posture and is what
+  # to expect. `vfs` means the data root's own filesystem is overlayfs and overlay
+  # will not stack on itself; it is slow and disk-hungry in a 3Gi pod, and the fix
+  # is a memory-backed emptyDir for $HOME, not a package.
   echo "PROBE storage-driver   $(docker info --format "{{.Driver}}")"
   docker run --rm --network=host busybox echo "PROBE inner-container   ok"
 '

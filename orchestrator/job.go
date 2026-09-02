@@ -170,27 +170,18 @@ func (c Config) Build(r proxy.Run) *batchv1.Job {
 	return j
 }
 
-// relaxForRootlesskit is the posture a Docker run costs, and it is written here
-// rather than left to the operator because without it the run fails inside
-// rootlesskit with `newuidmap: write to uid_map failed: Operation not permitted`
-// — a message that names neither of its two causes.
+// relaxForRootlesskit is the posture a Docker run costs — exactly two fields, and
+// written here rather than left to the operator because without them the run dies
+// inside rootlesskit with `newuidmap: write to uid_map failed: Operation not
+// permitted`, a message that names neither cause. `newuidmap` is privileged by a
+// file capability, and no_new_privs and an emptied bounding set each independently
+// neuter one. Nothing else moves: not the uid, the read-only rootfs, the seccomp
+// profile or the runtime class. Measured; see docs/architecture.md#8.
 //
-// Both are measured, under plain gVisor at uid 1000. `newuidmap` is privileged by
-// a **file capability** (a setuid-root exec grants no capabilities at all under
-// gVisor), so: no_new_privs blocks the file capability exactly as it blocks
-// setuid, and `drop: [ALL]` empties the bounding set the file capability is
-// intersected with. Nothing else about the posture moves — not the uid, not the
-// read-only rootfs, not the seccomp profile, not the runtime class.
-//
-// ⚠️ These two fields are also exactly what Pod Security Standards `restricted`
-// forbids, and the chart's own template advertises compliance with it. In a
-// namespace labelled `pod-security.kubernetes.io/enforce=restricted` a `-docker`
-// run therefore creates its Job successfully and then has **every pod rejected at
-// admission**, so it sits with no pods until activeDeadlineSeconds expires and is
-// reported as a deadline with no hint of the cause. There is nothing to do about
-// it here — the wrap genuinely needs the capability — so it is stated rather than
-// worked around: such a namespace needs `baseline` (or an exemption) before a
-// Docker run is asked for, and a default run is unaffected either way.
+// ⚠️ These two fields are also what Pod Security Standards `restricted` forbids,
+// so a `-docker` run in such a namespace has every pod rejected at admission and
+// burns its deadline saying nothing. Stated rather than worked around — the wrap
+// genuinely needs the capability. A default run is unaffected.
 func relaxForRootlesskit(ct *corev1.Container) {
 	if ct.SecurityContext == nil {
 		ct.SecurityContext = &corev1.SecurityContext{}

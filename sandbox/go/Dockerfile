@@ -16,14 +16,18 @@ FROM ${BASE}
 # The base ends at USER 1000, which is the contract. Back to it at the bottom.
 USER 0
 
-# uidmap for newuidmap/newgidmap, slirp4netns for rootlesskit's network, iproute2
-# because slirp4netns shells out to `ip` to create its tap device (missing, the
-# only symptom is `nsenter: failed to execute ip` from inside rootlesskit), and
-# fuse-overlayfs because the kernel's overlayfs is not usable in an unprivileged
-# user namespace. No iptables: dockerd runs with it off, and iptables-nft cannot
+# uidmap for newuidmap/newgidmap, slirp4netns for rootlesskit's network, and
+# iproute2 because slirp4netns shells out to `ip` to create its tap device
+# (missing, the only symptom is `nsenter: failed to execute ip` from inside
+# rootlesskit). No iptables: dockerd runs with it off, and iptables-nft cannot
 # initialise under gVisor anyway.
+#
+# No fuse-overlayfs, though Docker's rootless prerequisites list it and #74 first
+# copied that list: it is a FUSE filesystem and the PodSpec mounts no /dev/fuse,
+# so dockerd can never select it. The fallback is overlay2, or vfs where the data
+# root's own filesystem will not stack — e2e/85 prints which.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      uidmap slirp4netns fuse-overlayfs iproute2 \
+      uidmap slirp4netns iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
 # The toolchain, as the upstream tarball pinned by checksum rather than the
@@ -65,34 +69,18 @@ RUN curl -fsSL -o /tmp/d.tgz https://download.docker.com/linux/static/stable/x86
       docker-rootless-extras/rootlesskit \
  && rm /tmp/d.tgz /tmp/r.tgz
 
-# ---------------------------------------------------------------------------
 # THIS BLOCK IS NOT REMOVABLE. It reads like leftover scaffolding and it is the
 # half that three attempts to graft rootless Docker onto this base died on.
+# rootlesskit cannot map a range of subordinate ids itself: it hands the job to
+# newuidmap/newgidmap, which need the ranges declared here and need to be
+# privileged themselves.
 #
-# rootlesskit maps a range of subordinate ids into its user namespace, and the only
-# way an unprivileged process may map more than its own single id is to hand the
-# job to newuidmap/newgidmap — which need a range declared for the user in
-# /etc/subuid and /etc/subgid, and need to be privileged themselves. Without the
-# ranges rootlesskit falls back to a single-id mapping and dockerd fails later, a
-# long way from the cause.
-#
-# **File capabilities, and not the setuid bit Debian's uidmap ships.** Measured,
-# and it is the whole difference between a working image and one whose only symptom
-# is `newuidmap: write to uid_map failed: Operation not permitted`: under gVisor a
-# setuid-root exec raises euid to 0 and grants **no capabilities at all** — CapPrm
-# stays 0, where host runc hands over the entire bounding set — so a setuid
-# newuidmap is unprivileged exactly where we run it. A file capability is honoured.
-# The setuid bit goes with it, so there is one mechanism rather than two and no
-# illusion that the other is doing anything. (Alpine's shadow-uidmap ships
-# cap_setuid=ep for the same reason, which is why the spike's image worked.)
-#
-# Two consequences for the PodSpec of a run that turns the wrap on, both real and
-# both recorded here next to their cause: `allowPrivilegeEscalation: false` sets
-# no_new_privs, which blocks a file capability exactly as it blocks setuid, and
-# `capabilities: drop: [ALL]` empties the bounding set a file capability is
-# intersected with. So such a run needs `allowPrivilegeEscalation: true` and
-# `add: [SETUID, SETGID]`. A run with the wrap off — the default — keeps the
-# posture the chart renders entirely untouched.
+# **A file capability, and not the setuid bit Debian's uidmap ships** — under
+# gVisor a setuid-root exec grants no capabilities at all, so a setuid newuidmap
+# is unprivileged exactly where we run it. The setuid bit goes with it, so there
+# is one mechanism rather than two. This is also why a wrapped run needs two
+# securityContext fields back; see docs/architecture.md#8 for the measurement and
+# orchestrator/job.go's relaxForRootlesskit for the patch.
 RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
  && echo 'agent:100000:65536' > /etc/subuid \
  && echo 'agent:100000:65536' > /etc/subgid \
@@ -100,6 +88,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
  && setcap cap_setgid+ep /usr/bin/newgidmap \
  && chmod 0755 /usr/bin/newuidmap /usr/bin/newgidmap \
  && rm -rf /var/lib/apt/lists/*
-# ---------------------------------------------------------------------------
 
 USER 1000

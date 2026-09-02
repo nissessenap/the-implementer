@@ -110,11 +110,12 @@ orchestrator-image:
 # .github/workflows/sandbox-image.yaml, which pushes the moving :v1 and the
 # immutable :v1.2.3 and prints the digest Helm should pin — a `docker push` from a
 # laptop would be a second, unpinnable way to publish the same name.
-SANDBOX_IMAGE ?= ghcr.io/nissessenap/implementer-base
-# The language images are `implementer-go`, `-node`, `-python` — a separate name
-# rather than a tag on the base, because they are separate images with separate
-# CVE surfaces and ADR 0003's `sandbox.images` map points at one per toolchain.
+# One prefix for all four: the language images are `implementer-go`, `-node`,
+# `-python`, separate names rather than tags on the base, because they are separate
+# images with separate CVE surfaces and ADR 0003's `sandbox.images` map points at
+# one per toolchain.
 SANDBOX_IMAGE_PREFIX ?= ghcr.io/nissessenap/implementer
+SANDBOX_IMAGE = $(SANDBOX_IMAGE_PREFIX)-base
 SANDBOX_TAG ?= dev
 
 sandbox-image:
@@ -126,10 +127,8 @@ sandbox-image:
 # publishing workflow does, for the same reason. Each is checked against the
 # contract as it is built, which is the half of the acceptance criteria that needs
 # no cluster and no dollar; the other half is e2e/85.
-SANDBOX_TOOLCHAINS ?= go node python
-
 sandbox-images: sandbox-image
-	@set -e; for t in $(SANDBOX_TOOLCHAINS); do \
+	@set -e; for t in go node python; do \
 	  docker build --build-arg BASE=$(SANDBOX_IMAGE):$(SANDBOX_TAG) \
 	    -t $(SANDBOX_IMAGE_PREFIX)-$$t:$(SANDBOX_TAG) sandbox/$$t; \
 	  sandbox/contract.sh $(SANDBOX_IMAGE_PREFIX)-$$t:$(SANDBOX_TAG) $$t; \

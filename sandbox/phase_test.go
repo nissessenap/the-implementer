@@ -61,7 +61,9 @@ func TestRunPlan(t *testing.T) {
 			eq(t, "cost", fmt.Sprintf("%.3f", r.CostUSD), "2.030")
 			// The wrap defaults off, and this is where that is asserted: rootlesskit
 			// is on PATH for every case, so its absence here is the run plan's doing.
-			eq(t, "unwrapped", h.used(t, "rootlesskit.args"), false)
+			if _, err := os.Stat(filepath.Join(h.stubs, "rootlesskit.args")); err == nil {
+				t.Error("the run plan reached for rootlesskit without SANDBOX_DOCKER")
+			}
 			// The title round-trips byte for byte, quotes and newline included.
 			eq(t, "pr_title", r.PRTitle, issueTitle)
 			if r.ElapsedS < 0 {
@@ -371,7 +373,11 @@ func TestRunPlan(t *testing.T) {
 			// The gate polled until the daemon answered rather than taking the
 			// first no for an answer — the stub says no twice — and the fourth call
 			// is the log line naming the version it got.
-			eq(t, "docker version calls", h.readStub(t, "dockerv"), "4\n")
+			n, err := os.ReadFile(filepath.Join(h.stubs, "dockerv"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, "docker version calls", string(n), "4\n")
 		},
 	}, {
 		// The flag is the run plan's and the stack is the go image's, so asking a
@@ -620,15 +626,6 @@ func (h harness) blob(t *testing.T) []byte {
 	return b
 }
 
-// used reports whether a stub recorded an invocation. The stubs are on PATH for
-// every case, so this is what makes "the run plan did not reach for it" an
-// assertion rather than an absence.
-func (h harness) used(t *testing.T, name string) bool {
-	t.Helper()
-	_, err := os.Stat(filepath.Join(h.stubs, name))
-	return err == nil
-}
-
 // stubArgs is the NUL-joined argv a stub recorded, rendered readable.
 func (h harness) stubArgs(t *testing.T, name string) string {
 	t.Helper()
@@ -637,16 +634,6 @@ func (h harness) stubArgs(t *testing.T, name string) string {
 		t.Fatalf("%s recorded nothing: %v", name, err)
 	}
 	return strings.ReplaceAll(string(b), "\x00", " ")
-}
-
-// readStub is a counter or marker a stub left behind, verbatim.
-func (h harness) readStub(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(h.stubs, name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
 }
 
 // args is the prompt and flags the nth `claude` invocation was handed, NUL-joined.
