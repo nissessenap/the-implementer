@@ -181,7 +181,20 @@ images'.
 `e2e/85-language-images.sh` is the half no unit test reaches: each image cloning a
 real repository of its language through the proxy and building and testing it, plus
 the `go` image running Docker under gVisor. It needs stages 10–30 (a working
-cert-manager) and never skips.
+cert-manager), and the three language runs never skip.
+
+Its **fourth** run, the Docker one, is skipped unless `RUNTIME_CLASS` names a
+gVisor class — so kind, and therefore CI, does not attempt it. Under runc it cannot
+pass and never could: `seccompProfile: RuntimeDefault` denies `clone(CLONE_NEWUSER)`
+to an unprivileged process (`fork/exec /proc/self/exe: operation not permitted`),
+and containerd exposes no `/dev/net/tun`, so slirp4netns cannot create its tap even
+once the userns is up. runsc implements both itself. Relaxing either would test a
+posture the chart never renders, so the wrap is proven on a local k3s with gVisor:
+
+```sh
+RUNTIME_CLASS=gvisor E2E_IMAGE_LOAD='sh -c "docker save \"$0\" | sudo k3s ctr images import -"' \
+  ./e2e/85-language-images.sh
+```
 
 ### The orchestrator's informer
 

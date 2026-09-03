@@ -140,9 +140,9 @@ comments() { thread "$1" | grep -o 'implementer-run:' | wc -l | tr -d ' '; }
 
 stage "create the three runs"
 kubectl -n "$NS" delete job -l app=implementer --cascade=foreground --wait >/dev/null
-BLOB_JOB=$(orch run "$RUN_REPO#$BLOB_ISSUE" | tee /dev/stderr | job_of)
-DEAD_JOB=$(orch run "$RUN_REPO#$DEAD_ISSUE" | tee /dev/stderr | job_of)
-orch run "$RUN_REPO#$LIVE_ISSUE" | tee /dev/stderr >/dev/null
+BLOB_JOB=$(orch run "$RUN_REPO#$BLOB_ISSUE" | tee_stderr | job_of)
+DEAD_JOB=$(orch run "$RUN_REPO#$DEAD_ISSUE" | tee_stderr | job_of)
+orch run "$RUN_REPO#$LIVE_ISSUE" | tee_stderr >/dev/null
 
 stage "the run that wrote a blob"
 kubectl -n "$NS" wait --for=condition=Complete "job/$BLOB_JOB" --timeout=180s >/dev/null

@@ -10,10 +10,10 @@
 # contract check proves an image is shaped right, and only this proves it can
 # actually resolve dependencies and run a test suite from inside the sandbox.
 #
-# Four runs. Three are the language images doing their language's work. The fourth
-# is the `go` image with the rootlesskit wrap on — the one thing that needs gVisor,
-# a real uid 1000 and the builder's own securityContext patch, and which nothing
-# offline can prove.
+# Four runs. Three are the language images doing their language's work and never
+# skip. The fourth is the `go` image with the rootlesskit wrap on, and it is the
+# only thing in this harness that needs a **real gVisor** underneath: under runc it
+# cannot pass and never could, so it runs only when RUNTIME_CLASS names one.
 set -euo pipefail
 
 # shellcheck source=lib.sh
@@ -96,7 +96,7 @@ run_toolchain() {
   # swallowed as a redelivery.
   job=$(RUN_KEY_FILE=$(run_key_file) POD_NAMESPACE="$NS" PROXY_HOST="$RELEASE" \
     JOB_TEMPLATE_FILE="$tmpl" go run "$E2E_DIR/../cmd/orchestrator" run "${@:4}" \
-    "$ref" | tee /dev/stderr | awk '{print $2}' | cut -d/ -f2-)
+    "$ref" | tee_stderr | awk '{print $2}' | cut -d/ -f2-)
   rm -f "$tmpl"
   wait_job "$job"
 }
@@ -179,6 +179,17 @@ run_toolchain python "$PREFIX-python:$TAG" "$PYTHON_REPO#$ISSUE" -toolchain pyth
 # The rootlesskit invocation below is the run plan's, spelled out because this
 # probe replaces the run plan. sandbox/phase_test.go is what pins the script's own
 # copy; what is under test here is the *image* and the *posture*.
+#
+# **Skipped without RUNTIME_CLASS**, which is what kind — and so CI — is. Two of
+# runc's defaults each independently make the wrap impossible there, and neither is
+# something this stage may relax without testing a posture the chart never renders:
+# `seccompProfile: RuntimeDefault` denies `clone(CLONE_NEWUSER)` to an unprivileged
+# process, so rootlesskit fails at `fork/exec /proc/self/exe: operation not
+# permitted`; and containerd exposes no `/dev/net/tun`, so slirp4netns cannot create
+# its tap even once the userns is up. runsc implements both itself.
+if [[ -z ${RUNTIME_CLASS:-} ]]; then
+  stage "go + docker: SKIP — no RUNTIME_CLASS, and the wrap needs a real gVisor"
+else
 {
   posture
   cat <<'EOP'
@@ -212,7 +223,9 @@ exec rootlesskit --net=slirp4netns --mtu=1500 --disable-host-loopback \
 EOP
 } > "$PROBE"
 run_toolchain "go + docker" "$PREFIX-go:$TAG" "$GO_REPO#$((ISSUE + 1))" -toolchain go -docker
+fi
 
 echo
-echo "==> three language images build and test their own language through the proxy,"
-echo "==> and the go image runs Docker as uid 1000, unprivileged, under gVisor"
+echo "==> three language images build and test their own language through the proxy"
+[[ -z ${RUNTIME_CLASS:-} ]] ||
+  echo "==> and the go image runs Docker as uid 1000, unprivileged, under gVisor"
