@@ -23,6 +23,7 @@ reader until the orchestrator's PR builder becomes the second one.
 
 ```sh
 make sandbox-image                 # local build; publishing is the v* tag workflow
+make sandbox-images                # the base plus go, node and python
 go test ./sandbox                  # the whole run plan, offline, in ~2s
 ```
 
@@ -112,6 +113,88 @@ the Job name plus a swallowed `AlreadyExists`, and nothing here may key on the
 delivery id. The **edit-after-label window** is #32 and deliberately open.
 
 [adr4]: docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md
+
+### The per-language images
+
+`sandbox/go`, `sandbox/node` and `sandbox/python` are ADR 0003's toolchain
+vocabulary as three thin derivatives, each `FROM` the base and each carrying a
+toolchain and **nothing else**. No registry configuration, deliberately: an
+organization that needs a private npm, pip or module registry bakes it into its own
+derived image, and putting it here would make our images the place everyone
+patches. They publish as `ghcr.io/nissessenap/implementer-{go,node,python}`, from
+the same workflow run and under the same tags as the base — one build graph, so the
+four are a matched set and the very first tag has no chicken-and-egg.
+
+`sandbox/contract.sh <image> [toolchain]` is ADR 0001's contract checked against a
+*built image*, and `make sandbox-images` runs it on each. Its largest check is to
+run the shipped `phase.sh` and require it to get past preflight — one check instead
+of a second copy of the list, which is the copy that would drift. The rest is what
+preflight cannot see: the image's default uid, the absence of registry
+configuration, and the toolchain the derivative exists to carry.
+
+**A toolchain version the image lacks is not an error.** `GOTOOLCHAIN` stays at
+`auto`, so a `go.mod` asking for a version we do not ship downloads it mid-run and
+completes. Setting it to `local` would convert that into a failure that looks like
+the repository's fault. The cost is egress to the toolchain hosts as well as the
+module hosts, which #64 and #16 have to price.
+
+### Docker in the `go` image, and what it costs
+
+The wrap is a **per-run flag, off by default**: `orchestrator run -docker` writes
+`SANDBOX_DOCKER=1`, and the run plan re-execs itself under `rootlesskit
+--net=slirp4netns` — the *whole* script, not just the daemon, which is what puts
+the agent, dockerd and inner containers in one netns on host networking. Unset, the
+pod is byte-for-byte the posture the chart renders.
+
+Four things about it were measured against k3s with real gVisor and are easy to
+"simplify" back out:
+
+- **`newuidmap` is privileged by a file capability, not by setuid.** Under gVisor a
+  setuid-root exec raises `euid` to 0 and grants **no capabilities at all**
+  (`CapPrm` stays `0`; host `runc` hands over the whole bounding set), so Debian's
+  setuid-root `newuidmap` is unprivileged exactly where we run it. The only symptom
+  is `newuidmap: write to uid_map failed: Operation not permitted`.
+- **So a Docker run costs two PodSpec fields, and exactly two.** `no_new_privs` and
+  an emptied bounding set each independently neuter a file capability, so the
+  builder patches `allowPrivilegeEscalation: true` and `capabilities: add: [SETUID,
+  SETGID]` — and nothing else. Not the uid, not the read-only rootfs, not the
+  seccomp profile, not the runtime class.
+- **`iproute2` is in the image because `slirp4netns` shells out to `ip`.** Missing,
+  the only symptom is `nsenter: failed to execute ip` from inside rootlesskit.
+- **The readiness gate is `docker version`, never `docker info`** — `info` answers
+  about six seconds before the daemon is usable.
+
+⚠️ **A Docker run cannot run in a `restricted` namespace.** Those same two fields
+are precisely what Pod Security Standards `restricted` forbids, and the chart's Job
+template otherwise satisfies it. Under
+`pod-security.kubernetes.io/enforce=restricted` the Job is created and every pod is
+rejected at admission, so the run sits with no pods until `activeDeadlineSeconds`
+and is reported as a deadline with no hint of the cause. Such a namespace needs
+`baseline` before `-docker` is used. A default run is unaffected.
+
+⚠️ **`bwrap` does not work on this runsc, in the base image, with the wrap off.**
+`bwrap --ro-bind / / true` fails `Can't open source /: Function not implemented` at
+uid 1000 — identically in all four images, so the wrap neither causes nor fixes it.
+The spike's green result does not reproduce; that is #22's thread, not the language
+images'.
+
+`e2e/85-language-images.sh` is the half no unit test reaches: each image cloning a
+real repository of its language through the proxy and building and testing it, plus
+the `go` image running Docker under gVisor. It needs stages 10–30 (a working
+cert-manager), and the three language runs never skip.
+
+Its **fourth** run, the Docker one, is skipped unless `RUNTIME_CLASS` names a
+gVisor class — so kind, and therefore CI, does not attempt it. Under runc it cannot
+pass and never could: `seccompProfile: RuntimeDefault` denies `clone(CLONE_NEWUSER)`
+to an unprivileged process (`fork/exec /proc/self/exe: operation not permitted`),
+and containerd exposes no `/dev/net/tun`, so slirp4netns cannot create its tap even
+once the userns is up. runsc implements both itself. Relaxing either would test a
+posture the chart never renders, so the wrap is proven on a local k3s with gVisor:
+
+```sh
+RUNTIME_CLASS=gvisor E2E_IMAGE_LOAD='sh -c "docker save \"$0\" | sudo k3s ctr images import -"' \
+  ./e2e/85-language-images.sh
+```
 
 ### The orchestrator's informer
 

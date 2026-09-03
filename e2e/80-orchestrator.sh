@@ -145,11 +145,11 @@ stage "create the run for $RUN_REPO#$ISSUE"
 # below is the idempotency assertion — so it starts from none. Foreground cascade,
 # or the old pod is still being collected when the new one is polled for.
 kubectl -n "$NS" delete job -l app=implementer --cascade=foreground --wait >/dev/null
-JOB=$(orch run "$RUN_REPO#$ISSUE" | tee /dev/stderr | job_of)
+JOB=$(orch run "$RUN_REPO#$ISSUE" | tee_stderr | job_of)
 UID_BEFORE=$(kubectl -n "$NS" get "job/$JOB" -o jsonpath='{.metadata.annotations.implementer\.dev/run-uid}')
 
 stage "run it again — redelivery is a no-op, not a second Job and not an error"
-AGAIN=$(orch run "$RUN_REPO#$ISSUE" | tee /dev/stderr)
+AGAIN=$(orch run "$RUN_REPO#$ISSUE" | tee_stderr)
 VERB=$(awk '{print $1}' <<<"$AGAIN")
 [[ $VERB == exists ]] || { echo "!!! FAIL: the second run reported '$VERB'" >&2; exit 1; }
 # And it says *which* exists. ttlSecondsAfterFinished keeps a terminal Job for a

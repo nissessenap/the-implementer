@@ -87,6 +87,17 @@ needs `/etc/subuid` and `/etc/subgid` ranges for uid 1000 plus privileged
 `newuidmap`/`newgidmap`. Three attempts to graft the working setup onto our base
 failed on progressively deeper pieces of exactly that plumbing.
 
+> **Amended 2026-09-01 by [#74][langimages], which is the fourth attempt and the
+> one that landed.** "Privileged" is a **file capability** and not the setuid bit
+> Debian's `uidmap` ships: under gVisor a setuid-root exec raises `euid` to 0 and
+> grants **no capabilities at all**, so `setcap cap_setuid+ep` is the only spelling
+> that works where we run. It also costs the wrapped run two PodSpec fields —
+> `allowPrivilegeEscalation: true` and `capabilities: add: [SETUID, SETGID]`, both
+> written by the orchestrator's builder — because `no_new_privs` and an emptied
+> bounding set each independently neuter a file capability. And `iproute2` joins
+> the package list: `slirp4netns` shells out to `ip`. Detail in
+> [architecture §8][arch8].
+
 **Wrapping is opt-in per run, and defaults off.** Inside `rootlesskit` a process
 reads its own uid as 0. The pod is still uid 1000 to gVisor and to the kernel, but
 the agent CLI's root gate trips, and bubblewrap is at risk for the same reason it
@@ -485,6 +496,8 @@ claimed and which the base image does not currently provide — see [issue
 [proxyproto]: https://github.com/nissessenap/the-implementer/pull/35
 [cbsurvey]: ../research/credential-brokers-and-whether-to-buy-the-proxy.md
 [adr3]: 0003-toolchain-detection-and-image-selection.md
+[langimages]: https://github.com/nissessenap/the-implementer/issues/74
+[arch8]: ../architecture.md#8-docker-inside-the-sandbox
 [bw745]: https://github.com/containers/bubblewrap/issues/745
 [gv13438]: https://github.com/google/gvisor/issues/13438
 [gv13347]: https://github.com/google/gvisor/pull/13347

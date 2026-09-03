@@ -1,8 +1,13 @@
-# The sandbox base image's repeatable build. On a pull request it builds and throws
-# the result away; on a tag it publishes the moving :v1 alongside the immutable
-# :v1.2.3 and prints the digest, because ADR 0001 has Helm default to the immutable
-# reference and the orchestrator record the digest it actually ran — tags can be
-# re-pushed, and an eval result citing a mutable tag is not honest.
+# The sandbox images' repeatable build: the base, plus ADR 0003's three language
+# derivatives. On a pull request it builds and throws the result away; on a tag it
+# publishes the moving :v1 alongside the immutable :v1.2.3 and prints the digests,
+# because ADR 0001 has Helm default to the immutable reference and the orchestrator
+# record the digest it actually ran — tags can be re-pushed, and an eval result
+# citing a mutable tag is not honest.
+#
+# One job and not four, so the derivatives are built `FROM` the base this run just
+# produced rather than from a published one: the four images are a matched set out
+# of one build graph, and there is no chicken-and-egg on the very first tag.
 name: sandbox-image
 
 on:
@@ -11,9 +16,6 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
-
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/implementer-base
 
 jobs:
   image:
@@ -32,29 +34,56 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          # Exactly these two, and no `latest`: the action's default flavor is
-          # `latest=auto`, which would publish a third, floating tag on an image
-          # whose whole posture is digest-pinning.
-          flavor: latest=false
-          # The immutable reference and the moving major, from the tag itself. A
-          # workflow_dispatch or a pull request gets neither and builds unpushed.
-          tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: sandbox
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-      # The one line an operator needs: `sandbox.image` in charts/orchestrator.
-      # Gated on the same event as the push above: a pull-request build produces a
-      # digest too, and printing one for an image nobody can pull is worse than
-      # printing nothing.
-      - if: github.event_name == 'push'
-        run: echo "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      # One build of the base, and the three derivatives `FROM` that exact image.
+      # `docker build` throughout, and build-push-action for none of it: that action
+      # pushes what it builds, so the local tag the derivatives need would have to
+      # come from a *second* build of the same context — and nothing enforces that
+      # the second one is the first one. A cache miss there (another buildx driver,
+      # an evicted cache, a `apt-get update` layer that busts) publishes
+      # implementer-go:v1.2.3 derived from a base nobody can pull, while the
+      # summary prints the other base's digest. Build once, tag from it, push tags.
+      #
+      # Publishing is a separate step below rather than a `push:` flag here, because
+      # a pull request builds all four and pushes none of them.
+      - name: the images
+        run: |
+          set -eu
+          docker build -q -t implementer-base:ci sandbox
+          for l in go node python; do
+            docker build -q --build-arg BASE=implementer-base:ci -t "implementer-$l:ci" "sandbox/$l"
+          done
+
+      # ADR 0001's contract, checked rather than trusted — including on the base,
+      # which is where the run plan's own preflight is asserted to still pass.
+      - name: the image contract
+        run: |
+          set -eu
+          sandbox/contract.sh implementer-base:ci
+          for l in go node python; do sandbox/contract.sh "implementer-$l:ci" "$l"; done
+
+      # All four under the same two tags and from the same run, so a
+      # `sandbox.images` map is one version across the set. The digest each push
+      # prints is the one Helm should pin: `docker push` reports the digest of what
+      # it actually stored, which `docker inspect` cannot when two tags share it.
+      #
+      # No `latest`, deliberately: a floating third tag on an image whose whole
+      # posture is digest-pinning. The moving major is skipped for a prerelease, and
+      # that is not tidiness either — pushing `:v2` for a release candidate would
+      # leave `:v2` resolving to one, which is the matched set this job exists to
+      # keep pointed at something a human meant to ship.
+      - name: publish
+        if: github.event_name == 'push'
+        run: |
+          set -eu
+          v=${GITHUB_REF_NAME#v}
+          for l in base go node python; do
+            img=ghcr.io/${{ github.repository_owner }}/implementer-$l
+            case $v in
+              *-*) ;;
+              *) docker tag "implementer-$l:ci" "$img:v${v%%.*}"
+                 docker push -q "$img:v${v%%.*}" ;;
+            esac
+            docker tag "implementer-$l:ci" "$img:v$v"
+            d=$(docker push "$img:v$v" | awk '/digest: /{print $3}')
+            echo "$img@$d" >> "$GITHUB_STEP_SUMMARY"
+          done

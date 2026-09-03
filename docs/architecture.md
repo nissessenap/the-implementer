@@ -410,12 +410,50 @@ The image needs `/etc/subuid` + `/etc/subgid` ranges for uid 1000 and
 appropriately privileged `newuidmap`/`newgidmap` — the non-obvious half, and
 what three grafting attempts died on.
 
+**Amended by [#74][langimages], measured on k3s with real gVisor: "appropriately
+privileged" means a *file capability*, and the PodSpec has to leave room for it.**
+Under gVisor a setuid-root exec raises `euid` to 0 and grants **no capabilities at
+all** — `CapPrm` stays `0`, where host `runc` hands over the whole bounding set —
+so Debian's setuid-root `newuidmap` is unprivileged exactly where we run it and
+`rootlesskit` dies with `newuidmap: write to uid_map failed: Operation not
+permitted`. `setcap cap_setuid+ep` is honoured; Alpine's `shadow-uidmap` ships
+exactly that, which is why the spike's `docker:29-dind-rootless` worked and a
+Debian graft did not. Two PodSpec consequences follow for a run with the wrap
+**on**, and they are the whole cost: `allowPrivilegeEscalation: false` sets
+`no_new_privs`, which blocks a file capability exactly as it blocks setuid, and
+`capabilities: drop: [ALL]` empties the bounding set the file capability is
+intersected with — so such a run needs `allowPrivilegeEscalation: true` and
+`add: [SETUID, SETGID]`, written by the orchestrator's builder rather than left to
+the operator. Nothing else moves: uid 1000, `readOnlyRootFilesystem`,
+`seccompProfile: RuntimeDefault`, `runAsNonRoot` and the runtime class are all
+untouched, which is a **tighter** posture than the spike measured — though those
+two fields are exactly what Pod Security Standards `restricted` forbids, so a
+`-docker` run in a namespace enforcing it is admitted as a Job and rejected as a
+pod, and burns its deadline saying nothing. That is stated rather than worked
+around: the wrap genuinely needs the capability. The image also needs `iproute2`: `slirp4netns` shells out to `ip` for its tap device, and the
+only symptom of its absence is `nsenter: failed to execute ip` from inside
+`rootlesskit`.
+
 ⚠️ **Cost, still unmeasured:** inside rootlesskit the process reads its own uid
 as 0, which trips the agent CLI's root gate (needing `IS_SANDBOX=1`, the exact
 bypass the non-root posture exists to avoid) and puts bubblewrap — an
 [ADR 0001][adr1] requirement — at risk. **Recommendation: make the wrap a
 per-run flag defaulting off**, so the `go` image carries Docker, a normal run
 keeps the clean uid-1000 posture, and only a run that asks for it pays.
+
+**Shipped as recommended:** `SANDBOX_DOCKER=1` in the run's environment, written
+by `orchestrator run -docker` and by nothing else. The run plan re-execs itself
+under `rootlesskit` and starts the daemon; unset, it does neither and the pod is
+byte-for-byte the posture the chart renders. The `IS_SANDBOX=1` half turns out to
+cost nothing new — the Job template sets it unconditionally already, because the
+agent CLI refuses `--dangerously-skip-permissions` as uid 0 in the first place.
+
+**Bubblewrap is a separate, pre-existing failure and this measured it rather than
+caused it.** On k3s with runsc as of 2026-09-01, `bwrap --ro-bind / / true` fails
+`Can't open source /: Function not implemented` at uid 1000 in the **base** image,
+with the wrap off and every language image identically — the spike's green result
+does not reproduce, and the wrap changes nothing about it either way. That belongs
+to [#22][verify]'s open thread, not to the language images.
 
 **GKE does not transfer.** GKE Sandbox supports Docker v27/v28 only; our green
 result is v29 and flag-free. Any yes needs re-measuring there.
@@ -613,6 +651,7 @@ Stated plainly, because confidence and decidedness are different things.
 [adr1]: adr/0001-sandbox-image-strategy-and-byo-contract.md
 [adr2]: adr/0002-a-run-executes-as-a-kubernetes-job.md
 [adr3]: adr/0003-toolchain-detection-and-image-selection.md
+[langimages]: https://github.com/nissessenap/the-implementer/issues/74
 [adr4]: adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md
 [adr5]: adr/0005-credentials-terminate-at-the-credential-proxy.md
 [context]: ../CONTEXT.md
@@ -631,3 +670,4 @@ Stated plainly, because confidence and decidedness are different things.
 [ghtoken]: https://docs.github.com/en/actions/concepts/security/github_token
 [ghaw]: https://github.com/github/gh-aw
 [gvisorbug]: https://github.com/google/gvisor/issues/13438
+[verify]: https://github.com/nissessenap/the-implementer/issues/22

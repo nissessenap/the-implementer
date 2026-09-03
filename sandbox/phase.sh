@@ -72,6 +72,37 @@ die() {
   exit 1
 }
 
+# ------------------------------------------------------------------- docker ---
+# ADR 0001's per-run flag, and it defaults **off** — inside rootlesskit a process
+# reads its own uid as 0, which trips the agent CLI's root gate and puts bubblewrap
+# at risk, so only a run that asks for it pays. `orchestrator run -docker` writes
+# SANDBOX_DOCKER=1 and relaxes the two securityContext fields the wrap needs.
+#
+# The **whole** script is wrapped, not just dockerd: that is what puts the agent,
+# the daemon and inner containers in one network namespace on host networking, so
+# a testcontainers-shaped test can reach the service it started (#28).
+#
+# `--net=host` is not an option: it panics dockerd on the first `docker version`.
+if [ "${SANDBOX_DOCKER:-0}" = 1 ] && [ -z "${IN_ROOTLESSKIT:-}" ]; then
+  PHASE=docker
+  command -v rootlesskit >/dev/null ||
+    die "SANDBOX_DOCKER=1 but this image carries no rootlesskit: only the go image does"
+  # A child and not an `exec`: rootlesskit failing to *start* is the ending this
+  # flag is about, and under `exec` nothing would be left to write the blob. The
+  # `/bin/sh "$0"` re-entry works whether we were invoked as entrypoint or path.
+  _rc=0
+  rootlesskit --net=slirp4netns --mtu=1500 --disable-host-loopback \
+    --copy-up=/etc --copy-up=/run \
+    env IN_ROOTLESSKIT=1 /bin/sh "$0" || _rc=$?
+  # The inner run writes its own blob at every exit, so an empty one means
+  # rootlesskit never got as far as handing over — and this is the only place left
+  # that can say so. A blob that *is* there is the inner run's verdict and must
+  # survive untouched; only its status is carried out.
+  [ "$_rc" -eq 0 ] || [ -s "$TERM_LOG" ] ||
+    die "the rootlesskit wrap did not start (rc=$_rc): the pod needs allowPrivilegeEscalation and CAP_SETUID/CAP_SETGID for it — orchestrator run -docker sets both"
+  exit "$_rc"
+fi
+
 # ---------------------------------------------------------------- preflight ---
 # ADR 0001's contract, checked rather than commented — scion's `required_image_tools`
 # is declarative config with zero readers, so a non-conforming BYO image there fails
@@ -117,6 +148,41 @@ fi
 # cluster's business, so it is named here rather than guessed at from the symptom.
 [ -z "${SSL_CERT_FILE:-}" ] || [ -f "$SSL_CERT_FILE" ] ||
   die "SSL_CERT_FILE=$SSL_CERT_FILE does not exist: is the proxy CA mounted at /run/proxy-ca/ca.crt?"
+
+# The daemon, once, inside the namespace the block above re-entered through. No
+# flag here is a preference, all measured under plain gVisor at uid 1000: gVisor
+# cannot serve dockerd's iptables setup, creating a bridge writes
+# /proc/sys/net/ipv4/ip_forward which is EPERM in an unprivileged userns, and the
+# containerd snapshotter has to be off for `docker build`. --data-root because the
+# rootfs is read-only; $HOME is an emptyDir the pod can write. The log goes to the
+# runtime directory and not $WORKSPACE, which does not exist until the clone.
+if [ -n "${IN_ROOTLESSKIT:-}" ]; then
+  PHASE=docker
+  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/docker}
+  DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+  export XDG_RUNTIME_DIR DOCKER_HOST
+  # die() and not ${HOME:?…}, which would abort the shell with a bare message and
+  # leave the run with no result blob — the one thing every exit here owes.
+  [ -n "${HOME:-}" ] || die "HOME is unset: the daemon has nowhere to put its data root"
+  mkdir -p "$XDG_RUNTIME_DIR" "$HOME/.local/share/docker" ||
+    die "could not create the daemon's runtime and data directories"
+  log "start dockerd"
+  dockerd --iptables=false --ip6tables=false --bridge=none \
+    --feature containerd-snapshotter=false \
+    --data-root "${HOME}/.local/share/docker" --host "$DOCKER_HOST" \
+    > "$XDG_RUNTIME_DIR/dockerd.log" 2>&1 &
+  # `docker version`, never `docker info`: info answers about six seconds before
+  # the daemon is actually usable, so an info gate races the run's first
+  # `docker run` and fails it for a reason that looks like anything but a race.
+  _i=0
+  until docker version >/dev/null 2>&1; do
+    _i=$((_i + 1))
+    [ "$_i" -lt 90 ] ||
+      die "dockerd did not become usable: $(tail -3 "$XDG_RUNTIME_DIR/dockerd.log" | tr '\n' ' ')"
+    sleep 1
+  done
+  log "dockerd $(docker version --format '{{.Server.Version}}')"
+fi
 
 # -------------------------------------------------------------------- clone ---
 PHASE=clone

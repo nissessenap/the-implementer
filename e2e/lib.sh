@@ -125,6 +125,12 @@ wait_job() {
   }
 }
 
+# tee_stderr — `tee` a pipeline to stderr without *reopening* it. Plain
+# `tee /dev/stderr` opens the path afresh with O_TRUNC, so when a caller redirects
+# the run to a file (`make e2e >log 2>&1`) every stage before this one is wiped and
+# the failure arrives with no context. The process substitution inherits fd 2.
+tee_stderr() { tee >(cat >&2); }
+
 # load_image <image> — put a locally built image where the cluster can see it.
 # The one cluster-flavour variable the harness has: kind by default, and a local
 # k3s exports E2E_IMAGE_LOAD='<command taking the image name>', e.g.

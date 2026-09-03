@@ -413,3 +413,41 @@ func TestTheChartsTemplateSurvivesTheBuilder(t *testing.T) {
 		t.Errorf("the script did not survive the nested block scalars:\n%s", got)
 	}
 }
+
+// The wrap is a per-run flag and it is off by default, so the default run's
+// environment says nothing about it and its container securityContext is exactly
+// what the chart rendered. Turning it on costs two capabilities and no_new_privs
+// and *nothing else* — which is the assertion that matters, because the temptation
+// when the run fails inside rootlesskit is to relax the whole posture.
+func TestDockerIsOffByDefaultAndCostsOnlyWhatItMustWhenOn(t *testing.T) {
+	j, _ := build(t)
+	if _, ok := envOf(j)["SANDBOX_DOCKER"]; ok {
+		t.Error("SANDBOX_DOCKER is set on a run that did not ask for Docker")
+	}
+	if sc := j.Spec.Template.Spec.Containers[0].SecurityContext; sc != nil {
+		t.Errorf("the default run's container securityContext was patched: %+v", sc)
+	}
+
+	cfg := Config{Namespace: "n", ProxyHost: "p", Key: []byte("k"),
+		Template: template(t, miniTemplate), Docker: true}
+	on := cfg.Build(proxy.Run{Owner: "a", Repo: "b", Issue: "1", UID: "u"})
+	if got := envOf(on)["SANDBOX_DOCKER"]; got != "1" {
+		t.Errorf("SANDBOX_DOCKER = %q, want 1", got)
+	}
+	sc := on.Spec.Template.Spec.Containers[0].SecurityContext
+	if sc == nil || sc.AllowPrivilegeEscalation == nil || !*sc.AllowPrivilegeEscalation {
+		t.Fatal("allowPrivilegeEscalation was not relaxed: no_new_privs blocks newuidmap's file capability")
+	}
+	var caps []string
+	for _, c := range sc.Capabilities.Add {
+		caps = append(caps, string(c))
+	}
+	if strings.Join(caps, ",") != "SETUID,SETGID" {
+		t.Errorf("capabilities added = %v, want exactly SETUID,SETGID", caps)
+	}
+	// The posture that must *not* move with it. A pod-level field, so it is the
+	// same object the template carried.
+	if s := on.Spec.Template.Spec.SecurityContext; s == nil || s.RunAsUser == nil || *s.RunAsUser != 1000 {
+		t.Error("the run's uid moved with the wrap")
+	}
+}
