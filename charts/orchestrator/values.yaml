@@ -1,26 +1,53 @@
-# ponytail: this chart renders the run's Job template, a ServiceAccount and a
-# Role, and no Deployment — because there is nothing to deploy yet. The
-# orchestrator is a command line at this point, and its own environment is supplied
-# by whoever runs it: POD_NAMESPACE, PROXY_HOST, RUN_KEY_FILE and JOB_TEMPLATE_FILE
-# for `run`, plus GITHUB_APP_ID, GITHUB_APP_PROVIDER, GITHUB_APP_KEY and the
-# optional GITHUB_API_URL for `watch`. They become values here when the webhook
-# front-end lands and there is a Deployment to put them on; putting them here first
-# would be operator-facing values that nothing reads.
+# The orchestrator's own image, which is the webhook front-end — `make
+# orchestrator-image` builds and prints it.
 #
-# GITHUB_APP_KEY is a *reference* and never key bytes — a KMS crypto key version, or
-# a transit key — because the provider is chosen at build time exactly as the
-# proxy's is, and the production build has no PEM signer linked in at all.
-#
-# PROXY_HOST is the credential proxy's Service name as the *sandbox* resolves it —
-# so a proxy in another namespace is `credential-proxy.other.svc.cluster.local`.
-# The port is never configured: the sandbox is handed an `https_proxy` URL naming
-# 8080, and a second place to change it is only a second place to get it wrong.
-#
-# RUN_KEY_FILE is the one long-lived key the run credential derives from, and the
-# proxy's chart mounts the same Secret (`runKeySecretName` there, key `key`).
-# Neither chart owns it. The orchestrator computes HMAC-SHA256(key, run) when it
-# builds the Job and the proxy recomputes it from the pod's annotations, so
-# nothing is handed between them and there is no per-run Secret.
+# **Empty renders no Deployment and no Service**, and that is a supported shape
+# rather than a broken one: what is left is the Job template, the ServiceAccount and
+# the Role, which is the whole of what a command line needs. e2e stages 80 and 90
+# install exactly that. One value decides it, so there is no enabled flag that can
+# disagree with an image.
+image: ""
+
+# The webhook front-end's environment. What is *not* here is the point: it holds no
+# GitHub credential at all — the authorization is two clauses on the payload and the
+# refusal is silent, so there is nothing in this half that could write to GitHub.
+# The informer half is the one that authenticates as the App, and it is still a
+# command line (`orchestrator watch`); GITHUB_APP_ID, GITHUB_APP_PROVIDER and
+# GITHUB_APP_KEY become values here when it joins this Deployment.
+webhook:
+  # The Secret holding the webhook secret, under the key `secret`. Created out of
+  # band, like the run key, and **required** whenever there is an image: go-github
+  # validates nothing when the secret is empty and no signature arrives, so an
+  # unset one is an open trigger for anything that can reach the Service — with
+  # every legitimate delivery still working, which is what makes it invisible.
+  secretName: ""
+
+# ponytail: ADR 0003's toolchain detection is a later ticket, so until it lands this
+# is one answer for every repository the installation serves. Empty is legal and
+# means the review phase runs with no language subagent. Detection deletes this
+# value rather than defaulting it — it resolves a toolchain per repository, from the
+# repository, which is also the first thing that gives this half a GitHub credential.
+toolchain: ""
+
+# The credential proxy's Service name as the *sandbox* resolves it — so a proxy in
+# another namespace is `credential-proxy.other.svc.cluster.local`. The port is never
+# configured: the sandbox is handed an `https_proxy` URL naming 8080, and a second
+# place to change it is only a second place to get it wrong.
+proxyHost: credential-proxy
+
+# The one long-lived key the run credential derives from, and the proxy's chart
+# mounts the same Secret (`runKeySecretName` there too, key `key`). Neither chart
+# owns it. The orchestrator computes HMAC-SHA256(key, run) when it builds the Job
+# and the proxy recomputes it from the pod's annotations, so nothing is handed
+# between them and there is no per-run Secret.
+runKeySecretName: proxy-run-key
+
+# The front-end's own resources. It creates one object per delivery and holds no
+# run state, so this is a listener's footprint and not a run's — the run's are
+# under `sandbox` below.
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 256Mi }
 
 # The ConfigMap holding the CA that signed the proxy's serving certificate — only
 # the certificate; the key stays in the proxy's Secret. Mounted at

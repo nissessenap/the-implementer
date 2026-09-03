@@ -1,10 +1,11 @@
 // Command orchestrator turns an issue into a run.
 //
-// Deliberately a command line and not the webhook: every hard part of the PodSpec
-// is demoable and testable without a publicly reachable endpoint, and the webhook
-// lands on top of this. What it does is what the webhook front-end will do —
-// build one Job and create it — so the seam being exercised here is the real one.
+// `serve` is the trigger — a labelled issue becomes a run with no human at a
+// command line. `run` is the same thing from a terminal, and it stays because
+// every hard part of the PodSpec is demoable without a publicly reachable
+// endpoint: the two share startRun, so what the webhook does is what `run` does.
 //
+//	orchestrator serve [-addr :8080]
 //	orchestrator run [-dry-run] [-toolchain go] owner/repo#5
 //	orchestrator watch [-once]
 //	orchestrator cred owner repo issue run-uid
@@ -14,14 +15,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -39,6 +43,8 @@ func main() {
 	// ponytail: a hand-rolled dispatch, still. A flag library or per-subcommand
 	// help when one of these grows a second page of flags.
 	switch os.Args[1] {
+	case "serve":
+		serve(os.Args[2:])
 	case "run":
 		run(os.Args[2:])
 	case "watch":
@@ -51,7 +57,8 @@ func main() {
 }
 
 func usage() {
-	log.Fatal("usage: orchestrator run [-dry-run] [-toolchain <t>] <owner>/<repo>#<n>\n" +
+	log.Fatal("usage: orchestrator serve [-addr :8080]\n" +
+		"       orchestrator run [-dry-run] [-toolchain <t>] <owner>/<repo>#<n>\n" +
 		"       orchestrator watch [-once]\n" +
 		"       orchestrator cred <owner> <repo> <issue> <run-uid>")
 }
@@ -74,30 +81,17 @@ func run(args []string) {
 	// below discards it — a redelivery is not a new run.
 	r.UID = uid()
 
-	cfg := orchestrator.Config{
-		Namespace: env("POD_NAMESPACE"),
-		ProxyHost: env("PROXY_HOST"),
-		Key:       runKey(),
-		Toolchain: *toolchain,
-	}
-	if cfg.Template, err = orchestrator.LoadTemplate(env("JOB_TEMPLATE_FILE")); err != nil {
-		log.Fatal(err)
-	}
-	job := cfg.Build(r)
-
+	cfg := runConfig(*toolchain)
 	ctx, kube := context.Background(), client()
-	created, err := orchestrator.Create(ctx, kube, job, *dry)
-	if err != nil {
-		log.Fatalf("creating job %s: %v", job.Name, err)
-	}
 	// One word first, then the reference: the e2e reads $2 off this line, and a
 	// verb with a space in it would make the parse depend on which branch ran.
-	verb := "exists" // redelivery, swallowed — the name collided at the apiserver
+	name, created, err := startRun(ctx, kube, cfg, r, *dry)
+	if err != nil {
+		log.Fatal(err)
+	}
+	verb := "exists" // the name collided at the apiserver
 	if created {
 		verb = "created"
-	}
-	if *dry {
-		verb += "-dry-run"
 	}
 	// The existing Job's phase, appended *last* so $1 and $2 stay what the e2e
 	// reads. Without it `exists` covers two different situations: a redelivery,
@@ -108,9 +102,136 @@ func run(args []string) {
 	// is not.
 	state := ""
 	if !created {
-		state = " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, job.Name) + ")"
+		state = " (" + orchestrator.Phase(ctx, kube, cfg.Namespace, name) + ")"
 	}
-	fmt.Printf("%s %s/%s %s%s\n", verb, cfg.Namespace, job.Name, r, state)
+	if *dry {
+		verb += "-dry-run"
+	}
+	fmt.Printf("%s %s/%s %s%s\n", verb, cfg.Namespace, name, r, state)
+}
+
+// serve is ADR 0004's front-end half, and the trigger the whole system was for: a
+// labelled issue becomes a run with nobody at a command line. It creates one Job
+// and is done — it does not wait for the run, and the HTTP response is sent minutes
+// before the pull request exists.
+//
+// It holds no GitHub credential of any kind, which is not an oversight: the
+// authorization is two clauses on the payload (orchestrator.Webhook), the refusal
+// is silent on purpose, and there is nothing here that could write to GitHub. The
+// informer is the half that does, and it is still `watch`.
+func serve(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", ":8080", "the address to serve the webhook on; the chart's Service targets 8080")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		usage()
+	}
+
+	// ponytail: one toolchain for the whole installation until ADR 0003's detection
+	// lands — see charts/orchestrator/values.yaml. Unset is legal.
+	cfg := runConfig(os.Getenv("TOOLCHAIN"))
+	kube := client()
+
+	h := &orchestrator.Webhook{
+		// Required, and by name: an empty secret is an open trigger for anything
+		// that can reach the Service, and every legitimate delivery still works —
+		// so the misconfiguration is invisible unless boot refuses it.
+		Secret: []byte(env("GITHUB_WEBHOOK_SECRET")),
+		Start: func(ctx context.Context, r proxy.Run) error {
+			// The run's second factor, fresh per run — see `run` above for why it
+			// is not per issue, and why a swallowed AlreadyExists discards it.
+			r.UID = uid()
+			name, created, err := startRun(ctx, kube, cfg, r, false)
+			if err != nil {
+				return err
+			}
+			// The same disambiguation `run` prints, for the same reason: `exists`
+			// is a redelivery *or* a re-label of a run that already ended, and the
+			// TTL keeps a terminal Job for a day. The response body cannot carry
+			// this — nobody reads the App's delivery page — so the log is where a
+			// silently-dropped retry becomes visible at all.
+			verb := "created"
+			if !created {
+				verb = "exists (" + orchestrator.Phase(ctx, kube, cfg.Namespace, name) + ")"
+			}
+			log.Printf("webhook: %s %s/%s %s", verb, cfg.Namespace, name, r)
+			return nil
+		},
+	}
+
+	// SIGTERM is how a Deployment rolls, and draining is the whole point of the
+	// handshake below: a create already sent to the apiserver is a run, while a
+	// delivery cut off before it got there is a **lost** one — GitHub does not
+	// retry, it only marks the delivery failed and keeps it redeliverable by hand
+	// for three days, which needs a human to go looking.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	srv := &http.Server{
+		Addr:    *addr,
+		Handler: orchestrator.Routes(h),
+		// The body timeouts the proxy deliberately omits — there, deadlines set on
+		// the connection survive the CONNECT hijack and would cut a transfer off
+		// mid-stream; here the handler is plain JSON and none of that applies.
+		// Without ReadTimeout the read deadline is cleared once the headers are
+		// parsed, so a body trickled a byte at a time holds a goroutine for as long
+		// as it likes — before the signature check, so from anything that can reach
+		// the Service.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	// Shutdown closes the listeners first, so ListenAndServe returns *immediately*
+	// and the in-flight handlers are still running: without waiting for this
+	// channel the process would exit through the middle of them, which is the
+	// opposite of draining. Bounded at 20s and not longer: the preStop sleep and
+	// this both spend the same terminationGracePeriodSeconds (5 + 20 against the
+	// default 30), and past it the kubelet's SIGKILL lands with nothing logged.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(sctx); err != nil {
+			log.Printf("webhook: shutdown: %v", err)
+		}
+	}()
+	log.Printf("webhook: serving %s, creating runs in %s", *addr, cfg.Namespace)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+	<-done
+}
+
+// startRun is the whole of "turn a run into an object", and it is shared so that a
+// Job a webhook created and a Job a command line created differ in nothing but who
+// asked. False means the name collided at the apiserver — a redelivery, a second
+// label, or a re-run of a Job the TTL still holds.
+func startRun(ctx context.Context, kube kubernetes.Interface, cfg orchestrator.Config, r proxy.Run, dry bool) (name string, created bool, err error) {
+	job := cfg.Build(r)
+	created, err = orchestrator.Create(ctx, kube, job, dry)
+	if err != nil {
+		return job.Name, false, fmt.Errorf("creating job %s: %w", job.Name, err)
+	}
+	return job.Name, created, nil
+}
+
+// runConfig is everything the Job builder needs that is not the run, read from the
+// environment both `serve` and `run` take it from — so a Job a webhook created and
+// a Job a command line created differ in nothing but who asked.
+func runConfig(toolchain string) orchestrator.Config {
+	cfg := orchestrator.Config{
+		Namespace: env("POD_NAMESPACE"),
+		ProxyHost: env("PROXY_HOST"),
+		Key:       runKey(),
+		Toolchain: toolchain,
+	}
+	var err error
+	if cfg.Template, err = orchestrator.LoadTemplate(env("JOB_TEMPLATE_FILE")); err != nil {
+		log.Fatal(err)
+	}
+	return cfg
 }
 
 // watch is the informer half of ADR 0004: it watches the runs in this namespace and

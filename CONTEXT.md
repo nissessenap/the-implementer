@@ -13,9 +13,18 @@ then produces a pull request.
 
 **Orchestrator** — the Go process that turns a labelled issue into a pull
 request. A webhook front-end that creates one Job, plus an informer that watches
-Pods and acts on the terminal one. It holds no run state of its own: state lives
+Jobs and reads their Pods on demand. It holds no run state of its own: state lives
 in Kubernetes objects and GitHub, so **v1 has no database**. See
 [ADR 0004](docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md).
+
+**Trigger** — a signed `issues`/`labeled` webhook carrying the `ready-for-agent`
+label, which is the label `/triage` already produces, so the readiness contract is
+inherited rather than reinvented. The front-end creates one Job and is **done** — it
+does not wait for the run. Its authorization is two clauses on the payload and no
+permission API call, and an unauthorized sender is refused *silently*; both are
+counter-intuitive, and
+[ADR 0004](docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md)
+says why.
 
 **Silent death** — a run that ends with **no in-pod code having executed**:
 `OOMKilled`, `activeDeadlineSeconds`, eviction, `ImagePullBackOff`. No trap fires,
