@@ -119,8 +119,14 @@ produces no digest to pin), ensures the pool, atespace and template, creates one
 actor, waits for `/readyz`, POSTs once, prints the blob and deletes the actor
 with `--any-state` (a `RUNNING` actor is not otherwise deletable).
 
-The first template create builds the golden snapshot and takes minutes. Expect
-~450s and ~$2 for the run itself. Transcript:
+The first template create builds the golden snapshot and takes minutes.
+
+**Cost.** `~450s and ~$2` is [CLAUDE.md][cmd]'s measured figure for three phases
+against a small repo, not a budget. The ceiling is much higher: `phase.sh`
+defaults to `--max-budget-usd 10` *per phase*, and the Job builder does not set
+it, so a real run is allowed $30. `MAX_USD_PER_PHASE` (default `2` here) is what
+keeps the spike cheap; the shim itself passes the value through undefaulted so
+its behaviour matches a Job's. Transcript:
 
 ```sh
 kubectl --context kind-kind ate logs actors issue-1 -a implementer-spike
@@ -172,3 +178,4 @@ Kill criteria worth writing down as they happen:
 [adr4]: ../../docs/adr/0004-the-orchestrator-is-a-controller-with-a-webhook-front-end.md
 [adr5]: ../../docs/adr/0005-credentials-terminate-at-the-credential-proxy.md
 [ctx]: ../../CONTEXT.md
+[cmd]: ../../CLAUDE.md

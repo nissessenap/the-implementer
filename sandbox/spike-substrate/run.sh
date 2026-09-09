@@ -26,6 +26,9 @@ BUCKET_NAME="${BUCKET_NAME:-ate-snapshots}"
 REGISTRY="${REGISTRY:-localhost:5001}"
 BASE="${BASE:-ghcr.io/nissessenap/implementer-base:dev}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
+# phase.sh defaults to $10 per phase and there are three, so an unset budget is
+# a $30 ceiling. A spike does not need the headroom a real run is allowed.
+MAX_USD_PER_PHASE="${MAX_USD_PER_PHASE:-2}"
 CTX="${KUBECTL_CONTEXT:-kind-kind}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -100,7 +103,9 @@ echo "== POST /run  (~450s, ~\$2 — one shot, no retry)"
 # and --max-time does not stop the actor — the trap's delete does.
 jq -n --arg r "$REPO" --arg i "$ISSUE" --arg t "$TOOLCHAIN" \
       --arg gh "$GH_TOKEN" --arg cc "$CLAUDE_CODE_OAUTH_TOKEN" \
-      '{repo:$r, issue:$i, toolchain:$t, gh_token:$gh, claude_token:$cc}' \
+      --arg b "$MAX_USD_PER_PHASE" \
+      '{repo:$r, issue:$i, toolchain:$t, gh_token:$gh, claude_token:$cc,
+        max_usd_per_phase:$b}' \
   | curl -sS --fail-with-body --max-time "${RUN_TIMEOUT:-2400}" \
       -H "ate-target-actor: $ATESPACE/$ACTOR" \
       -H 'content-type: application/json' --data @- \

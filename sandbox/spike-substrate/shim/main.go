@@ -90,7 +90,10 @@ func run(w http.ResponseWriter, r *http.Request) {
 		"TERM_LOG="+termLog,
 		"WORKSPACE="+env("WORKSPACE", "/workspace"),
 		"UNATTENDED=1",
-		"MAX_BUDGET_PER_PHASE_USD="+def(req.MaxUSDPhase, "2"),
+		// Passed through, not defaulted: unset here means phase.sh's own
+		// ${MAX_BUDGET_PER_PHASE_USD:-10}, which is what a Job gets today because
+		// the builder never sets it. run.sh is where the spike tightens it.
+		"MAX_BUDGET_PER_PHASE_USD="+req.MaxUSDPhase,
 	)
 	// The transcript stays the observability channel: stdout/stderr here is what
 	// `kubectl ate logs actors` shows, the same role `kubectl logs` plays today.
