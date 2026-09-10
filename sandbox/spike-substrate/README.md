@@ -100,6 +100,29 @@ hack/create-kind-cluster.sh                    # cluster + local registry on :50
 hack/install-ate-kind.sh --deploy-ate-system   # postgres, RustFS, ateapi, atelet, atecontroller, atenet, podcert
 ```
 
+### The router's route timeout — required, and not a default
+
+`atenet-router` gives a workload request **10 seconds** end to end
+(`defaultRouteTimeout`, `cmd/atenet/internal/router/xds.go:143`). A run is
+minutes, so the POST comes back `504` long before `phase.sh` finishes. Raise it
+once per cluster:
+
+```sh
+kubectl -n ate-system patch deploy atenet-router --type=json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--route-timeout=20m"}]'
+kubectl -n ate-system rollout status deploy/atenet-router
+```
+
+This is a supported setting rather than a workaround — the flag's own help says
+*"Raise it for actors whose turns legitimately run long — a harness relaying an
+LLM completion holds the request open for the whole generation."*
+
+⚠️ The manifest derives `--drain-timeout` from the route timeout and notes that
+the sum "must fit within `terminationGracePeriodSeconds`, or the kubelet
+SIGKILLs mid-drain" — which is 60s. So restarting the router during a run drops
+the in-flight request. Accepted here; a real version would either raise the
+grace period to match or stop holding the request open at all.
+
 Snapshotting cannot be switched off — `snapshotsConfig` is a required
 `ActorTemplate` field and `CreateActorTemplate` always builds a golden snapshot.
 The kind overlay ships **RustFS**, an in-cluster S3, so nothing leaves the
@@ -129,7 +152,9 @@ keeps the spike cheap; the shim itself passes the value through undefaulted so
 its behaviour matches a Job's. Transcript:
 
 ```sh
-kubectl --context kind-kind ate logs actors issue-1 -a implementer-spike
+# `kubectl ate` needs the plugin installed; otherwise, from the substrate repo:
+#   go run ./cmd/kubectl-ate logs actors issue-1 -a implementer-spike --context kind-kind
+kubectl ate logs actors issue-1 -a implementer-spike --context kind-kind
 ```
 
 Offline check of the only non-trivial logic — the result channel:
@@ -158,19 +183,81 @@ change of any kind. If the answer is yes, the create-and-POST moves into
 `orchestrator run` and reuses the informer's comment writer. Until then this
 directory is the whole of it.
 
-## Verdict
+## Verdict: yes, it runs — at the cost of two ADR properties
 
-*Unrun.* Record the answer here — the question it settled, and whether ADR 0002's
-three-part reconsider test is any closer to met.
+Run against [nissessenap/tmp-test-repo#3][issue3] on 2026-09-10, `kind` +
+`ate-system`, one warm gVisor worker:
 
-Kill criteria worth writing down as they happen:
+```
+status      completed        pr_title  feat(calc): add Min function mirroring Max
+commits     1                message   pushed implementer/issue-3
+cost_usd    1.37             phases    implement / review / ponytail — all completed
+elapsed_s   170
+```
 
-- [ ] The golden snapshot builds at all for a ~1.5GB image.
-- [ ] `bubblewrap` still works — the base image is `USER 1000` and gVisor is the
-      sandbox class, the same pairing ADR 0001 depends on.
-- [ ] The actor survives one full run without being suspended under it.
-- [ ] A second `run.sh` for the same issue collides instead of starting a run.
+Branch `implementer/issue-3` really landed — commit `ae0f144`, `calc/calc.go` +
+`calc/calc_test.go`, authored `the-implementer`. So the answer to the question
+is: **the run plan needs no change, and `phase.sh` was never touched.** The whole
+adaptation is the shim, and `$TERM_LOG` being an env var is what made it free.
 
+### Kill criteria, settled
+
+- ✅ **The golden snapshot builds** for the ~1.5GB actor image, and resume is
+  seconds.
+- ❌ **`bubblewrap` as uid 1000 — moot, and the reason is bad.** The run does not
+  execute as 1000 at all (below). `phase.sh` only presence-checks `bwrap`
+  (`sandbox/phase.sh:79`) and never invokes it, so nothing failed — but ADR 0001's
+  non-root default is gone rather than satisfied.
+- ✅ **The actor survives a full run** without being suspended under it.
+- ✅ **A second run of the same issue collides** on `AlreadyExists` and is
+  refused, leaving the in-flight actor untouched. ADR 0004's idempotency
+  mechanism carries over exactly.
+
+### The two regressions
+
+1. **Credentials are inside the sandbox** (ADR 0005). Argued above: per-run in
+   the request body, never in the shared immutable template.
+2. **The run executes as root** (ADR 0001). Not a choice. `atelet` unpacks the
+   image with every path owned by `0:0` — the image's `useradd -u 1000 -m` home
+   arrives root-owned `0700`, which `GET /debug` prints — and an `ActorTemplate`
+   has no `runAsUser`: its `SecurityContext` carries `capabilities` and nothing
+   else. Dropping with `setpriv` was tried and fails, because uid 1000 owns
+   nothing in the rootfs it needs. `IS_SANDBOX=1` is what makes the agent CLI
+   accept `--dangerously-skip-permissions` as uid 0, and gVisor is the
+   "deliberate sandbox" that setting refers to.
+
+### Also learned, and not obvious from the docs
+
+- **The router gives a request 10 seconds** by default. Raising it is a supported
+  flag, but it is not optional here — see above.
+- **`ActorTemplates` are immutable**, so a template named for the toolchain alone
+  silently pins its first image forever. The digest is in the name for that
+  reason, which incidentally restores ADR 0003's `imageID` digest honesty. It
+  still goes stale on a template-YAML-only edit; delete it by hand.
+- **`kubectl ate` is a plugin nobody installs.** `run.sh` shells out to
+  `go run ./cmd/kubectl-ate`, as substrate's own installer does.
+- **No exec RPC ([#185][i185]) means no debugging from outside.** The `ateom`
+  container is distroless, so there is no shell on the worker either. `GET /debug`
+  on the shim exists because it was the only way to see the unpacked rootfs.
+
+### Known gap in the spike itself
+
+Every toolchain builds from `implementer-base`, so **there is no language
+toolchain in the sandbox** — the implement phase said so itself: *"Could not run
+go build/test/gofmt to verify since no Go toolchain is present in this
+sandbox."* ADR 0003's thin per-language image is named but not wired up. Fix
+before drawing any conclusion about output quality.
+
+### What it does not answer
+
+Whether substrate is worth it. Nothing here tested the density it exists for —
+one actor on one worker, never suspended mid-run, snapshots written and ignored.
+ADR 0002's three-part reconsider test is still where it was, except that
+`ActorIdentity` remains unexercised: **per-run identity, the one open condition,
+is exactly what this spike did not touch.** That is the next question, not a
+migration.
+
+[issue3]: https://github.com/nissessenap/tmp-test-repo/issues/3
 [sub]: https://github.com/agent-substrate/substrate
 [i185]: https://github.com/agent-substrate/substrate/issues/185
 [i1526]: https://github.com/agent-substrate/substrate/issues/1526

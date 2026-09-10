@@ -26,7 +26,7 @@ func stub(t *testing.T, script string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PHASE_SH", path)
-	t.Setenv("HOME", dir)
+	t.Setenv("AGENT_HOME", dir)
 }
 
 func post(t *testing.T) *httptest.ResponseRecorder {
@@ -91,7 +91,7 @@ func TestStaleBlobIsNotReturned(t *testing.T) {
 	// A blob left behind by an earlier run must not be served as this run's
 	// result — the reason run() removes it before exec.
 	stub(t, `exit 1`)
-	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), "result.json"),
+	if err := os.WriteFile(filepath.Join(os.Getenv("AGENT_HOME"), "result.json"),
 		[]byte(`{"status":"completed"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

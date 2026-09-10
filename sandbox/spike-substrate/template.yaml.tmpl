@@ -1,7 +1,12 @@
 # ActorTemplate (protojson ateapipb.ActorTemplate) for the substrate spike.
-# One template per toolchain, which is the whole of ADR 0003's change: the
-# detection cascade is untouched and now picks a template name instead of an
-# image reference. Applied by run.sh with `kubectl ate create actor-template`.
+# One template per toolchain *and image digest* — run.sh builds the name, and
+# the digest is in it because a template is immutable. That is the whole of
+# ADR 0003's change: the detection cascade is untouched and now picks a
+# template name instead of an image reference.
+#
+# Note there is no runAsUser to be had: SecurityContext here carries
+# `capabilities` and nothing else, and atelet ignores the image's USER, so the
+# container runs as root and the shim drops to uid 1000 itself.
 #
 # There is deliberately NO env block. An ActorTemplate's env is literal-only
 # (no Secret valueFrom) and the template is immutable and shared by every run
@@ -11,7 +16,7 @@
 # README.md "What this costs in ADR 0005 terms".
 metadata:
   atespace: ${ATESPACE}
-  name: implementer-${TOOLCHAIN}
+  name: ${TEMPLATE}
 workerSelector:
   matchLabels:
     workload: implementer-spike
