@@ -1,0 +1,19 @@
+# The warm capacity. This is the pool ADR 0002 rejected, adopted knowingly:
+# one always-running worker per toolchain, and a worker hosts at most one Actor
+# at a time, so replicas is also the concurrency limit. One is enough for a
+# spike and the waste is the accepted price of the experiment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: implementer-spike
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: implementer-workerpool
+  namespace: implementer-spike
+  labels:
+    workload: implementer-spike
+spec:
+  replicas: 1
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor

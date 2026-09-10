@@ -1,0 +1,51 @@
+# ActorTemplate (protojson ateapipb.ActorTemplate) for the substrate spike.
+# One template per toolchain *and image digest* — run.sh builds the name, and
+# the digest is in it because a template is immutable. That is the whole of
+# ADR 0003's change: the detection cascade is untouched and now picks a
+# template name instead of an image reference.
+#
+# Note there is no runAsUser to be had: SecurityContext here carries
+# `capabilities` and nothing else, and atelet ignores the image's USER, so the
+# container runs as root and the shim drops to uid 1000 itself.
+#
+# There is deliberately NO env block. An ActorTemplate's env is literal-only
+# (no Secret valueFrom) and the template is immutable and shared by every run
+# of this toolchain, so a token here is upstream's own stated failure mode:
+# "pod env exists before the user does, so the same credentials reach every
+# tenant sandbox". Credentials arrive per-run in the POST body instead. See
+# README.md "What this costs in ADR 0005 terms".
+metadata:
+  atespace: ${ATESPACE}
+  name: ${TEMPLATE}
+workerSelector:
+  matchLabels:
+    workload: implementer-spike
+containers:
+- name: implementer
+  image: ${WORKLOAD_IMAGE}
+  command:
+  - /usr/local/bin/shim
+  readyz:
+    httpGet:
+      path: /readyz
+      port: 80
+    # The shim answers immediately; this covers a cold gVisor boot of a ~1.5GB
+    # image on a single kind node.
+    timeoutSeconds: 120
+resources:
+  limits:
+  - name: cpu
+    quantity: "2"
+  - name: memory
+    quantity: 2Gi
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  # Required field — snapshotting cannot be switched off. In kind this resolves
+  # to the in-cluster RustFS bucket the ate kind overlay installs, so nothing
+  # leaves the laptop and no Google credential is involved. The spike never
+  # calls Suspend or Resume itself.
+  storageLocation: gs://${BUCKET_NAME}/implementer-spike/
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_GVISOR
+  configName: gvisor-default
